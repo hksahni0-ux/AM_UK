@@ -1,0 +1,67 @@
+name: AM_UK Email Runner
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Cron is UTC-only and can't shift with BST/GMT, so each window below is
+    # padded to the union of both — email_runner.py's own pytz-aware check
+    # (MORNING_WINDOW / FRIDAY_WINDOW in config/settings.py) does the precise
+    # gating and exits instantly on any padding-only trigger.
+    # Mon-Thu 10:00-16:00 UK local -> 09:00-16:00 UTC (BST) .. 10:00-16:00 UTC (GMT)
+    - cron: "*/15 9-16 * * 1-4"
+    # Fri 08:30-12:30 UK local -> 07:30-11:30 UTC (BST) .. 08:30-12:30 UTC (GMT)
+    - cron: "*/15 7-12 * * 5"
+
+concurrency:
+  group: am-uk-email-runner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: "pip"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Restore secrets
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          TOKEN_HKSAHNI0: ${{ secrets.TOKEN_HKSAHNI0 }}
+          TOKEN_PRATEEK_SAHNI94: ${{ secrets.TOKEN_PRATEEK_SAHNI94 }}
+          TOKEN_SPRATEEK11294: ${{ secrets.TOKEN_SPRATEEK11294 }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          mkdir -p config/tokens logs
+          printf '%s' "$GOOGLE_CREDENTIALS_JSON" > config/credentials.json
+          printf '%s' "$TOKEN_HKSAHNI0" > config/tokens/token_hksahni0.json
+          printf '%s' "$TOKEN_PRATEEK_SAHNI94" > config/tokens/token_prateek_sahni94.json
+          printf '%s' "$TOKEN_SPRATEEK11294" > config/tokens/token_sprateek11294.json
+          {
+            echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+            echo "EXA_API_KEY=$EXA_API_KEY"
+            echo "LLM_PROVIDER=$LLM_PROVIDER"
+            echo "NVIDIA_API_KEY=$NVIDIA_API_KEY"
+          } > .env
+
+      - name: Run email runner
+        run: python email_runner.py
