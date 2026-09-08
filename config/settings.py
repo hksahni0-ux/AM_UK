@@ -78,9 +78,10 @@ MAX_SEQUENCE         = 3       # total emails per recipient (1 initial + 2 follo
 # While True: UK fresh (first-touch) sends are held back per sender, in favour of
 # that sender's UK followups and all Ireland activity (fresh + followups) —
 # clearing the existing UK followup backlog and standing up the Ireland campaign
-# before resuming UK top-of-funnel outreach. Self-clearing: even while True, a
-# sender's UK fresh sends resume automatically once SheetAgent.get_work_status()
-# shows no UK followups or Ireland fresh/followups left queued for it. Set to
+# before resuming UK top-of-funnel outreach. Evaluated per day, not overall:
+# SheetAgent.get_work_status() only counts followups actually due *today* — a
+# followup scheduled for a future date doesn't hold the pause, so a sender with
+# nothing actionable today still sends UK fresh rather than sitting idle. Set to
 # False to lift the pause immediately regardless of what's still queued.
 PAUSE_UK_FRESH_SENDS = True
 

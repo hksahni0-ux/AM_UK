@@ -179,11 +179,14 @@ class SheetAgent:
         """
         Single-pass scan of this sender's sheet for the UK-fresh-pause gate:
         {"uk_followups": bool, "ireland_fresh": bool, "ireland_followups": bool}
-        — whether each category still has any row outstanding (mid-sequence or
-        not-yet-contacted), regardless of whether it's due today. Unlike
-        get_eligible_rows(), this ignores next_followup_date entirely — it's
-        asking "is this category of work finished yet?", not "is it due now?".
+        — whether each category has work due *today*. The pause is meant to
+        hold UK fresh sends back only while there's something actionable right
+        now; a followup scheduled for a future date doesn't count, otherwise a
+        sender would sit idle on fresh sends for days over work it can't touch
+        yet. Fresh has no due date at all (always actionable once it exists),
+        so ireland_fresh stays "any row outstanding" same as before.
         """
+        today = _uk_now().date()
         result = {"uk_followups": False, "ireland_fresh": False, "ireland_followups": False}
 
         for item in self._all_rows():
@@ -207,14 +210,20 @@ class SheetAgent:
             except (ValueError, TypeError):
                 seq = 0
 
-            is_fresh    = status == STATUS_BLANK and seq == 0
-            is_followup = status == STATUS_FOLLOWUP_INITIATED and seq < MAX_SEQUENCE
+            is_fresh = status == STATUS_BLANK and seq == 0
+            followup_date = self._parse_date(self._get_val(row, "next_followup_date"))
+            is_followup_due = (
+                status == STATUS_FOLLOWUP_INITIATED
+                and seq < MAX_SEQUENCE
+                and followup_date is not None
+                and followup_date <= today
+            )
 
-            if country == "UK" and is_followup:
+            if country == "UK" and is_followup_due:
                 result["uk_followups"] = True
             elif country == "Ireland" and is_fresh:
                 result["ireland_fresh"] = True
-            elif country == "Ireland" and is_followup:
+            elif country == "Ireland" and is_followup_due:
                 result["ireland_followups"] = True
 
             if all(result.values()):
