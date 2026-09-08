@@ -39,10 +39,28 @@ def _model_for(task: str) -> str:
 # rather than at every call site.
 _NVIDIA_REASONING_BUFFER = 3000
 
+# "ultra" is NVIDIA's heaviest tier and the one that's shown repeated 503s
+# (backend overloaded) on write-heavy tasks — on a 503, step down once to
+# "super" (already proven stable in production for role_match/left_company_check)
+# rather than losing the whole 15-minute cycle for that contact.
+_NVIDIA_FALLBACK_MODEL = {
+    "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-super-120b-a12b",
+}
+
 
 def _nvidia_post(payload: dict) -> dict:
-    """POST to the NVIDIA NIM chat/completions endpoint, retrying once on 429/timeout."""
-    for attempt in range(2):
+    """POST to the NVIDIA NIM chat/completions endpoint.
+
+    Retries once on 429/timeout against the same model. On a 503 (backend
+    overloaded) for a model with a configured fallback, retries once more
+    against that fallback model instead of failing the call outright.
+    """
+    model = payload["model"]
+    fallback_model = _NVIDIA_FALLBACK_MODEL.get(model)
+    used_fallback = False
+    attempt = 0
+
+    while True:
         try:
             resp = requests.post(
                 f"{NVIDIA_API_BASE}/chat/completions",
@@ -52,11 +70,22 @@ def _nvidia_post(payload: dict) -> dict:
             )
         except requests.exceptions.Timeout:
             if attempt == 0:
+                attempt += 1
                 continue
             raise
+
         if resp.status_code == 429 and attempt == 0:
             time.sleep(2)
+            attempt += 1
             continue
+
+        if resp.status_code == 503 and fallback_model and not used_fallback:
+            log.warning("NVIDIA 503 on %s — retrying once with fallback %s", model, fallback_model)
+            payload = {**payload, "model": fallback_model}
+            used_fallback = True
+            attempt += 1
+            continue
+
         resp.raise_for_status()
         return resp.json()
 
