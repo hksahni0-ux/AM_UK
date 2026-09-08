@@ -1,16 +1,12 @@
 name: AM_UK Email Runner
 
 on:
+  # Scheduling is driven externally by a Google Apps Script time-based trigger,
+  # which calls this workflow's dispatch API with a PAT — GitHub's own `schedule`
+  # event proved unreliable (didn't fire at all for hours after being added).
+  # Apps Script does its own UK-business-hours window check before calling this,
+  # so every dispatch here is expected to be within an active send window.
   workflow_dispatch: {}
-  schedule:
-    # Cron is UTC-only and can't shift with BST/GMT, so each window below is
-    # padded to the union of both — email_runner.py's own pytz-aware check
-    # (MORNING_WINDOW / FRIDAY_WINDOW in config/settings.py) does the precise
-    # gating and exits instantly on any padding-only trigger.
-    # Mon-Thu 10:00-16:00 UK local -> 09:00-16:00 UTC (BST) .. 10:00-16:00 UTC (GMT)
-    - cron: "*/15 9-16 * * 1-4"
-    # Fri 08:30-12:30 UK local -> 07:30-11:30 UTC (BST) .. 08:30-12:30 UTC (GMT)
-    - cron: "*/15 7-12 * * 5"
 
 concurrency:
   group: am-uk-email-runner
