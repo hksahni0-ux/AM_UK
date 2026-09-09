@@ -303,6 +303,14 @@ class SheetAgent:
         log.info("Row %d: seq %d→%d status=%s next=%s thread=%s",
                  actual_row, sequence_step, new_seq, new_status, next_followup, thread_id)
 
+    def fix_recipient_email(self, row_number: int, old_email: str, new_email: str):
+        """Correct a malformed recipient address at its source after an
+        auto-repaired send succeeds, so later cycles (and reply_checker)
+        pick up the right address instead of the corrupted one."""
+        actual_row = self._live_row_number(old_email, row_number)
+        self._write_updates(actual_row, {"recipient_email": new_email})
+        log.info("Row %d: recipient email corrected %s → %s", actual_row, old_email, new_email)
+
     def mark_bounced(self, row_number: int):
         now = _uk_now()
         self._write_updates(row_number, {

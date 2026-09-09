@@ -15,6 +15,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -23,11 +24,13 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 socket.setdefaulttimeout(30)  # prevent any socket call hanging after sleep/wake
 
 import pytz
 import requests
+from googleapiclient.errors import HttpError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,6 +73,56 @@ _BANK_HOLIDAY_CACHE = {
     "UK":      os.path.join(os.path.dirname(__file__), "config", "uk_bank_holidays.json"),
     "Ireland": os.path.join(os.path.dirname(__file__), "config", "ie_bank_holidays.json"),
 }
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+# ── Malformed-recipient recovery ────────────────────────────────────────────
+
+def _is_invalid_recipient_error(exc: Exception) -> bool:
+    """True only for Gmail's permanent 'this address is malformed' rejection —
+    never for transient errors (network, quota, auth), which should keep
+    retrying/probing rather than getting the row marked bounced."""
+    if not isinstance(exc, HttpError) or exc.resp.status != 400:
+        return False
+    msg = str(exc).lower()
+    return "invalid to header" in msg or "invalidargument" in msg
+
+
+def _repair_invalid_recipient(recipient: str, company_website: str, first_name: str = "") -> str:
+    """Best-effort fix for a malformed address, anchored to the row's own
+    company domain so a repair can only ever land on the same company —
+    never guesses a different person or domain. Handles '@' being dropped
+    entirely, and a single stray character standing in for '@' (e.g. a
+    keyboard/paste glitch turning 'name@domain.com' into 'name2domain.com').
+    Prefers the candidate consistent with the row's known first name, then
+    falls back to trying the non-mutating fix (plain insert) before the
+    mutating one (drop the trailing stray char). Returns "" if no safe
+    repair is found."""
+    if not recipient or "@" in recipient or not company_website:
+        return ""
+    netloc = urlparse(company_website if "://" in company_website else f"//{company_website}").netloc
+    domain = netloc.split(":")[0].lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if not domain:
+        return ""
+    idx = recipient.lower().rfind(domain)
+    if idx <= 0:
+        return ""
+    local, rest = recipient[:idx], recipient[idx:]
+
+    candidates = []
+    fn = first_name.strip().lower()
+    if fn and local.lower().startswith(fn) and len(local) == len(fn) + 1:
+        candidates.append(f"{local[:len(fn)]}@{rest}")
+    candidates.append(f"{local}@{rest}")
+    candidates.append(f"{local[:-1]}@{rest}")
+
+    for candidate in candidates:
+        if _EMAIL_RE.match(candidate):
+            return candidate
+    return ""
 
 
 # ── Bank holidays ─────────────────────────────────────────────────────────────
@@ -351,27 +404,55 @@ def process_sender(sender: dict, mode: str):
         )
     except Exception as exc:
         log.error("[%s] Send failed for %s: %s", name, recipient, exc)
-        sent_subject = email["subject"]
-        if seq > 0 and existing_thread and not sent_subject.lower().startswith("re:"):
-            sent_subject = f"Re: {sent_subject}"
-        thread_id = ""
-        for attempt, delay in enumerate((0, 5, 10)):
-            if delay:
-                time.sleep(delay)
-            thread_id = gmail.find_recent_sent(recipient, sent_subject)
-            if thread_id:
-                break
-            log.warning(
-                "[%s] find_recent_sent found nothing for %s on attempt %d — "
-                "Gmail search index may still be catching up", name, recipient, attempt + 1
-            )
-        if thread_id:
-            log.warning(
-                "[%s] %s actually went out despite the error (thread %s) — "
-                "recording it instead of resending", name, recipient, thread_id
-            )
+
+        if _is_invalid_recipient_error(exc):
+            repaired = _repair_invalid_recipient(recipient, company_website, row.get("first_name", ""))
+            if not repaired:
+                log.error("[%s] %s is invalid and couldn't be auto-repaired — marking bounced",
+                           name, recipient)
+                sheet.mark_bounced(row["row_number"])
+                return
+            log.warning("[%s] %s looks malformed — retrying as %s", name, recipient, repaired)
+            try:
+                thread_id = gmail.send_email(
+                    to=repaired,
+                    subject=email["subject"],
+                    body_html=email["body_html"],
+                    body_plain=email["body_plain"],
+                    cv_path=cv_path,
+                    cv_bytes=cv_bytes,
+                    cv_filename=cv_filename,
+                    reply_to_thread_id=existing_thread if seq > 0 else "",
+                )
+            except Exception as exc2:
+                log.error("[%s] Retry with repaired address %s failed too: %s", name, repaired, exc2)
+                sheet.mark_bounced(row["row_number"])
+                return
+            sheet.fix_recipient_email(row["row_number"], recipient, repaired)
+            log.info("[%s] Repaired and sent: %s -> %s", name, recipient, repaired)
+            recipient = repaired
         else:
-            return
+            sent_subject = email["subject"]
+            if seq > 0 and existing_thread and not sent_subject.lower().startswith("re:"):
+                sent_subject = f"Re: {sent_subject}"
+            thread_id = ""
+            for attempt, delay in enumerate((0, 5, 10)):
+                if delay:
+                    time.sleep(delay)
+                thread_id = gmail.find_recent_sent(recipient, sent_subject)
+                if thread_id:
+                    break
+                log.warning(
+                    "[%s] find_recent_sent found nothing for %s on attempt %d — "
+                    "Gmail search index may still be catching up", name, recipient, attempt + 1
+                )
+            if thread_id:
+                log.warning(
+                    "[%s] %s actually went out despite the error (thread %s) — "
+                    "recording it instead of resending", name, recipient, thread_id
+                )
+            else:
+                return
     finally:
         if cv_temp_dir:
             shutil.rmtree(cv_temp_dir, ignore_errors=True)
