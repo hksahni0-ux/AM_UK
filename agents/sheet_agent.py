@@ -232,6 +232,8 @@ class SheetAgent:
         return result
 
     def get_today_send_count(self) -> int:
+        """Count of real sends today — last_action_date is stamped by mark_sent()
+        only, so this can't be inflated by reply_checker resolving rows same-day."""
         today = _uk_now().date()
         return sum(
             1 for item in self._all_rows()
@@ -312,28 +314,26 @@ class SheetAgent:
         log.info("Row %d: recipient email corrected %s → %s", actual_row, old_email, new_email)
 
     def mark_bounced(self, row_number: int):
-        now = _uk_now()
+        # last_action_date intentionally untouched — it tracks real sends only
+        # (see get_today_send_count), and a bounce isn't a new send.
         self._write_updates(row_number, {
             "status": STATUS_BOUNCED,
-            "last_action_date": now.strftime("%d %B %Y %H:%M:%S"),
         })
         log.info("Row %d: email bounced → bounced", row_number)
 
     def mark_reply_received(self, row_number: int):
-        now = _uk_now()
+        # last_action_date intentionally untouched — see mark_bounced.
         self._write_updates(row_number, {
             "status": STATUS_DISCUSSION,
             "reply_status": REPLY_STATUS_RECEIVED,
-            "last_action_date": now.strftime("%d %B %Y %H:%M:%S"),
         })
         log.info("Row %d: reply received → Discussion in Progress", row_number)
 
     def mark_not_interested(self, row_number: int):
-        now = _uk_now()
+        # last_action_date intentionally untouched — see mark_bounced.
         self._write_updates(row_number, {
             "status": STATUS_NOT_INTERESTED,
             "next_followup_date": "",
-            "last_action_date": now.strftime("%d %B %Y %H:%M:%S"),
         })
         log.info("Row %d: sequence complete, no reply by followup date → not interested", row_number)
 
@@ -365,10 +365,9 @@ class SheetAgent:
         return count
 
     def mark_no_longer_with_company(self, row_number: int):
-        now = _uk_now()
+        # last_action_date intentionally untouched — see mark_bounced.
         self._write_updates(row_number, {
             "status": STATUS_NO_LONGER_WITH_COMPANY,
-            "last_action_date": now.strftime("%d %B %Y %H:%M:%S"),
         })
         log.info("Row %d: contact no longer with company → no longer with company", row_number)
 
