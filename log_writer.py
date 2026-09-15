@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import (
     SPREADSHEET_ID, COLUMNS, GOOGLE_SCOPES, TIMEZONE, SENDERS,
-    STATUS_DISCUSSION, REPLY_STATUS_RECEIVED,
+    STATUS_DISCUSSION, STATUS_FOLLOWUP_INITIATED, REPLY_STATUS_RECEIVED,
 )
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -129,9 +129,10 @@ def collect_day_stats(target_date) -> dict:
             if reply_status == REPLY_STATUS_RECEIVED and status == STATUS_DISCUSSION:
                 stats[account]["replies"] += 1
 
-            # Email sent today: seq > 0 and status is not purely reply-detected
-            # A send always increments seq; reply detection does not change seq
-            elif seq > 0 and status != STATUS_DISCUSSION:
+            # Email sent today: mark_sent() is the only path that sets this status,
+            # so this excludes same-day bounces/expiries/departures being miscounted
+            # as sends.
+            elif seq > 0 and status == STATUS_FOLLOWUP_INITIATED:
                 stats[account]["tiers"][tier] += 1
 
     return stats
