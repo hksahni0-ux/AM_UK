@@ -105,7 +105,7 @@ class GmailAgent:
             self.service.users()
             .messages()
             .send(userId="me", body=body)
-            .execute()
+            .execute(num_retries=5)
         )
 
         thread_id = result.get("threadId") or reply_to_thread_id or ""
@@ -125,7 +125,7 @@ class GmailAgent:
             result = (
                 self.service.users().messages()
                 .list(userId="me", q=q, maxResults=5)
-                .execute()
+                .execute(num_retries=5)
             )
             messages = result.get("messages", [])
             if not messages:
@@ -135,7 +135,7 @@ class GmailAgent:
                 full = (
                     self.service.users().messages()
                     .get(userId="me", id=m["id"], format="minimal")
-                    .execute()
+                    .execute(num_retries=5)
                 )
                 sent_at = datetime.fromtimestamp(
                     int(full.get("internalDate", "0")) / 1000, tz=timezone.utc
@@ -160,7 +160,7 @@ class GmailAgent:
             thread = (
                 self.service.users().threads()
                 .get(userId="me", id=thread_id, format="full")
-                .execute()
+                .execute(num_retries=5)
             )
             messages = thread.get("messages", [])
             if not messages:
@@ -183,7 +183,7 @@ class GmailAgent:
             attachment = (
                 self.service.users().messages().attachments()
                 .get(userId="me", messageId=first_msg["id"], id=part["body"]["attachmentId"])
-                .execute()
+                .execute(num_retries=5)
             )
             data = attachment.get("data", "")
             if not data:
@@ -208,7 +208,7 @@ class GmailAgent:
                 self.service.users()
                 .messages()
                 .list(userId="me", q=q, maxResults=1)
-                .execute()
+                .execute(num_retries=5)
             )
             return bool(result.get("messages"))
         except Exception as exc:
@@ -225,7 +225,7 @@ class GmailAgent:
                 .threads()
                 .get(userId="me", id=thread_id, format="metadata",
                      metadataHeaders=["From"])
-                .execute()
+                .execute(num_retries=5)
             )
             for msg in thread.get("messages", []):
                 headers = {
@@ -252,7 +252,7 @@ class GmailAgent:
                 self.service.users()
                 .threads()
                 .get(userId="me", id=thread_id, format="full")
-                .execute()
+                .execute(num_retries=5)
             )
             own_email = self.sender["email"].lower()
             bodies = []
@@ -291,7 +291,7 @@ class GmailAgent:
                 self.service.users()
                 .messages()
                 .list(userId="me", q=q, maxResults=1)
-                .execute()
+                .execute(num_retries=5)
             )
             messages = result.get("messages", [])
             # Fallback: search by username only — catches OOOs sent from a different domain
@@ -303,7 +303,7 @@ class GmailAgent:
                     self.service.users()
                     .messages()
                     .list(userId="me", q=q2, maxResults=1)
-                    .execute()
+                    .execute(num_retries=5)
                 )
                 messages = result2.get("messages", [])
             if messages:
@@ -311,7 +311,7 @@ class GmailAgent:
                     self.service.users()
                     .messages()
                     .get(userId="me", id=messages[0]["id"], format="full")
-                    .execute()
+                    .execute(num_retries=5)
                 )
                 return True, self._extract_body_text(msg_full)
 
@@ -323,7 +323,7 @@ class GmailAgent:
                     self.service.users()
                     .threads()
                     .get(userId="me", id=thread_id, format="full")
-                    .execute()
+                    .execute(num_retries=5)
                 )
                 own_email = self.sender["email"].lower()
                 for msg in thread.get("messages", [])[1:]:  # skip first (our outbound)

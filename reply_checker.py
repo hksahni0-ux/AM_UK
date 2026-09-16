@@ -18,6 +18,8 @@ import logging
 import os
 import socket
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, timedelta
 
 socket.setdefaulttimeout(30)  # prevent any socket call hanging after sleep/wake
@@ -90,6 +92,10 @@ def check_sender(sender: dict, include_resolved: bool = False):
 
     log.info("[%s] Checking %d recipients for replies", name, len(rows))
     for row in rows:
+        # Small throttle — each row makes 3-4 Gmail API calls back-to-back, and
+        # firing them with zero delay across 80+ rows was blowing through Gmail's
+        # per-user rate limit, silently dropping reply detection on the errors.
+        time.sleep(0.3)
         recipient = row["recipient_email"]
         thread_id = row.get("thread_id", "")
         try:
@@ -188,11 +194,32 @@ def check_sender(sender: dict, include_resolved: bool = False):
 def main():
     full_sweep = "--full" in sys.argv[1:]
     log.info("=== Reply checker started%s ===", " (full sweep)" if full_sweep else "")
-    for sender in SENDERS:
+
+    # Each account has its own independent Gmail quota, and the per-row throttle
+    # plus retry/backoff (see check_sender) can push a single account's sweep
+    # past a minute — run all 3 concurrently (same pattern as email_runner.py's
+    # process_sender) so the wall-clock time is the slowest account, not the sum.
+    pool = ThreadPoolExecutor(max_workers=len(SENDERS))
+    futures = {
+        pool.submit(check_sender, sender, full_sweep): sender["email"]
+        for sender in SENDERS
+    }
+    done, pending = wait(futures, timeout=280)
+
+    for future in done:
+        sender_email = futures[future]
         try:
-            check_sender(sender, include_resolved=full_sweep)
+            future.result()
         except Exception as exc:
-            log.error("Unhandled error for %s: %s", sender["email"], exc)
+            log.error("Unhandled error for %s: %s", sender_email, exc)
+
+    if pending:
+        for future in pending:
+            log.error("[%s] Reply check exceeded 280s — abandoning", futures[future])
+        pool.shutdown(wait=False)
+        os._exit(1)
+
+    pool.shutdown(wait=False)
     log.info("=== Reply checker complete ===")
 
 

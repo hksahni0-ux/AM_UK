@@ -540,7 +540,7 @@ def main():
     try:
         subprocess.run(
             [sys.executable, os.path.join(_BASE_DIR, "reply_checker.py")],
-            timeout=300,
+            timeout=330,
         )
     except Exception as exc:
         log.warning("Reply checker failed: %s", exc)
