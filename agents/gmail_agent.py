@@ -216,8 +216,14 @@ class GmailAgent:
             return False
 
     def has_reply_in_thread(self, thread_id: str, recipient_email: str) -> bool:
-        """Return True if recipient_email has replied in the specific outreach thread."""
-        if not thread_id or not recipient_email:
+        """
+        Return True if anyone other than us has replied in the specific outreach
+        thread. Matches on "not our own sending address" rather than the sheet's
+        stored recipient_email — a contact can reply from a different address than
+        the one on file (e.g. a shortened internal alias), and since we're already
+        scoped to a single thread_id, any non-self message in it is a reply.
+        """
+        if not thread_id:
             return False
         try:
             thread = (
@@ -227,13 +233,22 @@ class GmailAgent:
                      metadataHeaders=["From"])
                 .execute(num_retries=5)
             )
+            own_email = self.sender["email"].lower()
             for msg in thread.get("messages", []):
                 headers = {
                     h["name"].lower(): h["value"]
                     for h in msg.get("payload", {}).get("headers", [])
                 }
-                if recipient_email.lower() in headers.get("from", "").lower():
-                    return True
+                from_header = headers.get("from", "").lower()
+                if own_email in from_header:
+                    continue
+                # A delivery-failure notice can thread onto the original send
+                # (rather than arriving as its own thread), and its automated
+                # sender must not be mistaken for the recipient replying —
+                # has_bounced() is the dedicated check for these.
+                if "mailer-daemon" in from_header or "postmaster" in from_header:
+                    continue
+                return True
             return False
         except Exception as exc:
             log.warning("Could not check thread %s for reply: %s", thread_id, exc)
