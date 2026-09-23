@@ -112,6 +112,7 @@ def check_sender(sender: dict, include_resolved: bool = False):
             # auto-reply frequently arrives as a separate thread (Gmail/Exchange give
             # both the same "Automatic reply" subject shape), so both must be checked.
             bodies = []
+            thread_body = ""
             if gmail.has_reply_in_thread(thread_id, recipient):
                 thread_body = gmail.get_reply_body_in_thread(thread_id, recipient)
                 if thread_body:
@@ -131,7 +132,13 @@ def check_sender(sender: dict, include_resolved: bool = False):
 
             # Already tagged OOO and nothing new suggests a departure — skip the LLM
             # call (this is what keeps repeat cycles on a long-running OOO cheap).
-            if already_handled_ooo and not has_departure_keywords(combined_body):
+            # But a message that actually landed IN the outreach thread is always new,
+            # substantive content — a recurring auto-responder only ever resurfaces via
+            # get_ooo_reply's separate-thread search, never as a fresh in-thread message —
+            # so never suppress classification just because the row is still OOO-tagged
+            # when thread_body is present (this is what let a real "thanks, forwarded to
+            # HR" reply sit unclassified for over a week after the contact came back from OOO).
+            if already_handled_ooo and not thread_body and not has_departure_keywords(combined_body):
                 log.debug("[%s] OOO from %s already handled (followup %s), skipping",
                           name, recipient, existing)
                 continue
