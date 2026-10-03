@@ -141,6 +141,7 @@ GOOGLE_SCOPES = [
 CANDIDATE_NAME      = "Prateek Sahni, MEng"
 CANDIDATE_PHONE     = "+91 9716922930"
 CANDIDATE_LINKEDIN  = "linkedin.com/in/prateek-sahni-meng"
+CANDIDATE_WEBSITE   = "prateeksahni.pages.dev"
 
 # ── CV tailoring ───────────────────────────────────────────────────────────────
 CV_MASTER_DOCX  = str(BASE_DIR / "cv" / "_PRATEEK CV_2026.docx")

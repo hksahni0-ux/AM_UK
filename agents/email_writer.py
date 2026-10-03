@@ -7,7 +7,7 @@ Bold usage (Claude outputs **text**, converted to <b> for HTML):
 - Role + company when describing own experience ("as a **Senior Process Engineer at Precise Axis**")
 - Key technical tools/skills when listed
 
-Signature: name in bold, LinkedIn clickable, phone plain text.
+Signature: name in bold, LinkedIn + website clickable, phone plain text.
 Sends multipart/alternative (HTML + plain text fallback).
 """
 
@@ -24,7 +24,7 @@ except ImportError:
 from agents import llm_client
 from config.settings import (
     EXA_API_KEY, CV_CONTEXT, DEFAULT_COUNTRY,
-    CANDIDATE_NAME, CANDIDATE_PHONE, CANDIDATE_LINKEDIN,
+    CANDIDATE_NAME, CANDIDATE_PHONE, CANDIDATE_LINKEDIN, CANDIDATE_WEBSITE,
     get_country_config,
 )
 
@@ -90,6 +90,8 @@ def _to_plain(text: str, sig_plain: str, sequence_step: int) -> str:
 def _sig_html(sender_email: str, sequence_step: int) -> str:
     linkedin_url = CANDIDATE_LINKEDIN if CANDIDATE_LINKEDIN.startswith("http") \
         else f"https://{CANDIDATE_LINKEDIN}"
+    website_url = CANDIDATE_WEBSITE if CANDIDATE_WEBSITE.startswith("http") \
+        else f"https://{CANDIDATE_WEBSITE}"
     phone_digits = CANDIDATE_PHONE.replace(" ", "")
     link_style = "color:#1155CC;text-decoration:none;"
     sign_off = _SIGN_OFFS[min(sequence_step, len(_SIGN_OFFS) - 1)]
@@ -99,6 +101,7 @@ def _sig_html(sender_email: str, sequence_step: int) -> str:
         f'<a href="mailto:{sender_email}" style="{link_style}">{sender_email}</a>'
         f" | "
         f'<a href="tel:{phone_digits}" style="{link_style}">{CANDIDATE_PHONE}</a><br>'
+        f'<a href="{website_url}" style="{link_style}">{CANDIDATE_WEBSITE}</a><br>'
         f'<a href="{linkedin_url}" style="{link_style}">{CANDIDATE_LINKEDIN}</a>'
     )
 
@@ -109,6 +112,7 @@ def _sig_plain(sender_email: str, sequence_step: int) -> str:
         f"{sign_off}\n"
         f"{CANDIDATE_NAME}\n"
         f"{sender_email} | {CANDIDATE_PHONE}\n"
+        f"{CANDIDATE_WEBSITE}\n"
         f"{CANDIDATE_LINKEDIN}"
     )
 
