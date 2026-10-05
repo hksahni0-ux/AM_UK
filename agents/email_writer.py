@@ -98,11 +98,10 @@ def _sig_html(sender_email: str, sequence_step: int) -> str:
     return (
         f"{sign_off}<br>"
         f"<b>{CANDIDATE_NAME}</b><br>"
-        f'<a href="mailto:{sender_email}" style="{link_style}">{sender_email}</a>'
-        f" | "
-        f'<a href="tel:{phone_digits}" style="{link_style}">{CANDIDATE_PHONE}</a><br>'
-        f'<a href="{website_url}" style="{link_style}">{CANDIDATE_WEBSITE}</a><br>'
-        f'<a href="{linkedin_url}" style="{link_style}">{CANDIDATE_LINKEDIN}</a>'
+        f'Email: <a href="mailto:{sender_email}" style="{link_style}">{sender_email}</a><br>'
+        f'Phone: <a href="tel:{phone_digits}" style="{link_style}">{CANDIDATE_PHONE}</a><br>'
+        f'Website: <a href="{website_url}" style="{link_style}">{CANDIDATE_WEBSITE}</a><br>'
+        f'LinkedIn: <a href="{linkedin_url}" style="{link_style}">{CANDIDATE_LINKEDIN}</a>'
     )
 
 
@@ -111,9 +110,10 @@ def _sig_plain(sender_email: str, sequence_step: int) -> str:
     return (
         f"{sign_off}\n"
         f"{CANDIDATE_NAME}\n"
-        f"{sender_email} | {CANDIDATE_PHONE}\n"
-        f"{CANDIDATE_WEBSITE}\n"
-        f"{CANDIDATE_LINKEDIN}"
+        f"Email: {sender_email}\n"
+        f"Phone: {CANDIDATE_PHONE}\n"
+        f"Website: {CANDIDATE_WEBSITE}\n"
+        f"LinkedIn: {CANDIDATE_LINKEDIN}"
     )
 
 
