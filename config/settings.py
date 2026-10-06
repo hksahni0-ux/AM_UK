@@ -95,7 +95,7 @@ TIMEZONE             = "Europe/London"
 # "off" disables the step entirely.
 AUTO_REPLY_MODE            = "send"
 AUTO_REPLY_DAILY_LIMIT     = 5     # per sender account, per UK calendar day
-AUTO_REPLY_MIN_AGE_HOURS   = 2     # wait at least this long after their message
+AUTO_REPLY_MIN_AGE_HOURS   = 0     # answer on the first run that sees their message (runs are ~15 min apart)
 AUTO_REPLY_MAX_AGE_DAYS    = 3     # never answer anything older than this
 AUTO_REPLY_LOG_SHEET       = "auto_replies"
 
