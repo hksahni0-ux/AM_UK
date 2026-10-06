@@ -366,23 +366,27 @@ def _paragraphs(reply_type: str, first: str, company: str, extras: dict) -> List
             f"experience could support {company}.",
         ]
     if reply_type == "apply_via_portal":
-        # No direct "please forward my CV" ask: they've just said the portal is the way in,
-        # and pushing past that reads as not listening — in Prateek's own threads it drew
-        # irritation or silence, while effort + a soft "keep me in mind" landed better.
+        # Works WITH their process rather than around it: apply via the portal, then ask one
+        # specific, easy-to-grant favour (flag the reference to the hiring manager) — more
+        # likely to land than "please forward my CV", firmer than "keep me in mind".
         role = extras.get("role_applied", "")
-        apply_line = (f"I'll apply for the {role} role through {company}'s careers page."
-                      if role else f"I'll apply through {company}'s careers page for any suitable roles.")
+        apply_line = (f"I'll submit my application for the {role} role through {company}'s careers page."
+                      if role else
+                      f"I'll submit my application for the most suitable role through {company}'s careers page.")
         return [
             f"Hi {first},",
             f"Thank you for getting back to me, and for pointing me to the right channel. {apply_line}",
-            "As I'm applying from overseas, I also make a point of researching the companies I'd "
-            "genuinely like to join and introducing myself to the people there directly, rather than "
-            f"relying on an online form alone. {company} is one of the companies I've specifically "
-            "chosen to approach this way.",
-            "If a role comes up that you think would suit my background, I'd be grateful if you'd "
-            f"keep me in mind. My portfolio at {CANDIDATE_WEBSITE} also gives a quick overview of the "
-            "projects I've delivered.",
-            "Thank you again for your time.",
+            "Alongside that, I make a point of reaching out directly to people at the companies I'd "
+            "genuinely like to join. Applying from overseas, I've found that a portal application on "
+            "its own rarely reaches a hiring manager, so rather than rely on a single online form, I "
+            "put in the extra work to research each company, follow what it's doing and introduce "
+            f"myself personally. {company} is one of the companies I've specifically chosen to "
+            "approach this way.",
+            "Once my application is in, would you be open to me sending you the reference, so you "
+            "could flag it to the hiring manager? A quick word from you would make sure it gets a "
+            "proper look, and I'd be glad to answer any questions they have. My portfolio at "
+            f"{CANDIDATE_WEBSITE} also gives a quick overview of the projects I've delivered.",
+            "Thank you again for your time and help.",
         ]
     if reply_type == "role_coming_soon":
         role = extras.get("upcoming_role", "")
