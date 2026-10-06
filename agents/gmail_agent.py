@@ -28,6 +28,12 @@ from config.settings import GOOGLE_SCOPES
 
 log = logging.getLogger(__name__)
 
+
+def _sent_date(msg: dict):
+    """The day a message arrived (Gmail internalDate), as a UTC date."""
+    ms = int(msg.get("internalDate", "0") or 0)
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date() if ms else None
+
 _OOO_SUBJECT_PATTERNS = [
     "out of office", "automatic reply", "auto-reply", "autoreply",
     "away from office", "on leave", "on annual leave", "on vacation",
@@ -330,7 +336,7 @@ class GmailAgent:
                 if body:
                     from_name, from_email = parseaddr(headers.get("from", ""))
                     messages.append({"from_name": from_name, "from_email": from_email.lower(),
-                                     "body": body})
+                                     "body": body, "date": _sent_date(msg)})
             return messages
         except Exception as exc:
             log.warning("Could not fetch reply body for thread %s: %s", thread_id, exc)
@@ -370,10 +376,10 @@ class GmailAgent:
         Searches by sender address (OOO replies from Exchange/Outlook arrive as
         separate threads, not threaded with the original sent email).
         after_date: Gmail date filter string e.g. "2026/08/01" — only OOOs after this date.
-        Returns (is_ooo: bool, body_text: str, from_header: str).
+        Returns (is_ooo: bool, body_text: str, from_header: str, sent_date: date|None).
         """
         if not recipient_email:
-            return False, "", ""
+            return False, "", "", None
         try:
             subject_terms = " OR ".join(
                 f'subject:"{p}"' for p in _OOO_SUBJECT_PATTERNS
@@ -420,7 +426,7 @@ class GmailAgent:
                 )
                 from_header = next((h["value"] for h in msg_full.get("payload", {}).get("headers", [])
                                     if h["name"].lower() == "from"), "")
-                return True, self._extract_body_text(msg_full), from_header
+                return True, self._extract_body_text(msg_full), from_header, _sent_date(msg_full)
 
             # Fallback: check the actual thread for any OOO reply regardless of sender domain.
             # Catches cases where the OOO arrives from a different address (e.g. afd-systems.com
@@ -441,11 +447,11 @@ class GmailAgent:
                     # Any non-us reply with an OOO subject is from the recipient side
                     if own_email not in from_addr and any(p in subject for p in _OOO_SUBJECT_PATTERNS):
                         body = self._extract_body_text(msg)
-                        return True, body, headers.get("from", "")
+                        return True, body, headers.get("from", ""), _sent_date(msg)
 
         except Exception as exc:
             log.warning("OOO check failed for %s: %s", recipient_email, exc)
-        return False, "", ""
+        return False, "", "", None
 
     def _extract_body_text(self, msg: dict) -> str:
         """Extract plain text from a Gmail message payload (up to 3000 chars).

@@ -208,12 +208,13 @@ def check_sender(sender: dict, include_resolved: bool = False):
                 thread_body = "\n\n---\n\n".join(m["body"] for m in messages)
                 if thread_body:
                     bodies.append(thread_body)
-            _, auto_reply_body, auto_reply_from = gmail.get_ooo_reply(thread_id, recipient, after_date=after_date)
+            _, auto_reply_body, auto_reply_from, auto_reply_date = gmail.get_ooo_reply(
+                thread_id, recipient, after_date=after_date)
             if auto_reply_body:
                 bodies.append(auto_reply_body)
                 from_name, from_email = parseaddr(auto_reply_from)
                 messages.append({"from_name": from_name, "from_email": from_email.lower(),
-                                 "body": auto_reply_body})
+                                 "body": auto_reply_body, "date": auto_reply_date})
 
             if not bodies:
                 log.debug("[%s] No reply yet from %s", name, recipient)
@@ -240,7 +241,10 @@ def check_sender(sender: dict, include_resolved: bool = False):
                           name, recipient, existing)
                 continue
 
-            result = classify_reply(combined_body)
+            # Partial return dates ("Friday the 2nd") mean the first match after the
+            # reply was SENT — which can be days before this run reads it.
+            sent = max((m["date"] for m in messages if m.get("date")), default=None)
+            result = classify_reply(combined_body, sent=sent)
             category = result["category"]
 
             if category == "real_reply":

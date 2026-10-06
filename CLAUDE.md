@@ -117,6 +117,7 @@ OAuth tokens are per-account at `config/tokens/token_<account>.json`. Run `setup
 - `SheetAgent.__init__` always uses `SENDERS[0]`'s credentials to open the spreadsheet (owner access), regardless of which sender is being processed — only the worksheet tab differs per sender
 - `mark_sent()` always re-fetches the live row number for the recipient email before writing, because `sort_all_sheets` may run between row selection and the write-back
 - A blank-status row that already has a Thread ID (a colleague added by hand to an existing conversation) is never treated as a fresh cold-email target
+- OOO return dates are resolved against the date the OOO was *sent*, not today; a weekday + day number ("Friday the 2nd") is resolved in code (`resolve_weekday_date`) and overrides the model, and a model date >45 days out with no month in the text is dropped — the model once turned "Friday the 2nd" (sent 30 Sep) into 2 Jan, pushing a followup three months out
 - `get_ooo_reply`'s username-only fallback (OOO from another domain) only accepts an exact local-part match — Gmail's `from:ross` also matches "Ross McCullough", which once attributed one contact's OOO to another
 - Lock files (`logs/*.lock`) prevent concurrent instances of the same script; a running instance causes the new one to `sys.exit(0)` silently
 - The cron runs in IST (machine timezone) but all send-window logic uses UK BST via pytz; the script self-exits if called outside the active window
