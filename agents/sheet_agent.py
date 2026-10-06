@@ -316,6 +316,40 @@ class SheetAgent:
         self._write_updates(actual_row, {"recipient_email": new_email})
         log.info("Row %d: recipient email corrected %s → %s", actual_row, old_email, new_email)
 
+    _BLOCKED_NOTE = "first email blocked by Gmail (CV flagged as a virus)"
+
+    def reset_blocked_send(self, row_number: int, recipient_email: str, sequence_step: int):
+        """
+        Gmail refused to send our email (attachment flagged as a virus), so the contact
+        never received it. A blocked first email: reset the row to fresh so it is sent
+        again (after the CV is fixed). Blocked twice, or a blocked followup: stop and
+        flag it rather than loop — a bad CV would otherwise be retried every cycle.
+        """
+        actual_row = self._live_row_number(recipient_email, row_number)
+        if actual_row < 2:
+            return
+        existing = self._get_val(self.ws.row_values(actual_row), "comments")
+        today = _uk_now().strftime("%d %b %Y")
+        if sequence_step == 1 and self._BLOCKED_NOTE not in existing:
+            note = f"{self._BLOCKED_NOTE} {today} — reset to resend"
+            self._write_updates(actual_row, {
+                "status": STATUS_BLANK, "sequence_step": "", "thread_id": "",
+                "next_followup_date": "", "last_action_date": "",
+                "comments": f"{existing} | {note}" if existing else note,
+            })
+            log.warning("Row %d: first email to %s was blocked by Gmail — reset to resend",
+                        actual_row, recipient_email)
+        else:
+            note = f"email blocked by Gmail again {today} (attachment flagged as a virus) — check the CV PDF"
+            if note in existing:
+                return
+            self._write_updates(actual_row, {
+                "status": STATUS_BOUNCED,
+                "comments": f"{existing} | {note}" if existing else note,
+            })
+            log.error("Row %d: email to %s blocked by Gmail (virus flag) again — marked bounced, check the CV",
+                      actual_row, recipient_email)
+
     def mark_bounced(self, row_number: int):
         # last_action_date intentionally untouched — it tracks real sends only
         # (see get_today_send_count), and a bounce isn't a new send.
@@ -431,6 +465,8 @@ class SheetAgent:
             log.warning("No row for %s — mobile %s not saved", recipient_email, mobile)
             return
         old = self._get_val(self.ws.row_values(actual_row), "mobile")
+        if old == mobile:
+            return            # already current — no write, no misleading "mobile was" note
         self._write_updates(actual_row, {"mobile": mobile})
         log.info("Row %d: mobile %s → %s (from their email)", actual_row, old or "blank", mobile)
         if old.lower() not in ("", "not revealed"):
@@ -550,5 +586,6 @@ class SheetAgent:
                 "last_name": self._get_val(row, "last_name"),
                 "mobile": self._get_val(row, "mobile"),
                 "company_name": self._get_val(row, "company_name"),
+                "sequence_step": seq,
             })
         return rows

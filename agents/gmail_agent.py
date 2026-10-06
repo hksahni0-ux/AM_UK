@@ -213,6 +213,30 @@ class GmailAgent:
             log.warning("Could not fetch initial attachment from thread %s: %s", thread_id, exc)
             return None, None
 
+    def attachment_blocked(self, thread_id: str) -> bool:
+        """
+        True if Gmail refused to send our message in this thread because it flagged an
+        attachment as a virus ("One of your attachments contained a virus. Your message
+        was not sent.") — the recipient never got it. has_bounced() doesn't see these:
+        the notice names no recipient address.
+        """
+        if not thread_id:
+            return False
+        try:
+            thread = (
+                self.service.users().threads()
+                .get(userId="me", id=thread_id, format="metadata", metadataHeaders=["From"])
+                .execute(num_retries=5)
+            )
+            for msg in thread.get("messages", []):
+                from_header = next((h["value"].lower() for h in msg.get("payload", {}).get("headers", [])
+                                    if h["name"].lower() == "from"), "")
+                if "mailer-daemon" in from_header and "contained a virus" in msg.get("snippet", "").lower():
+                    return True
+        except Exception as exc:
+            log.warning("Could not check thread %s for a blocked attachment: %s", thread_id, exc)
+        return False
+
     def has_bounced(self, recipient_email: str) -> bool:
         """Return True if any delivery failure notification exists for recipient_email."""
         if not recipient_email:

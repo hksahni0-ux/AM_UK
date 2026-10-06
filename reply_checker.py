@@ -95,6 +95,11 @@ def _collect_contact_details(sheet, row, messages, known_contacts: dict, new_con
         if found["mobile"]:
             sheet.update_mobile(row["row_number"], recipient, found["mobile"])
             row["mobile"] = found["mobile"]
+            # Keep the cache _sweep_signatures reads in step, or it sees the old number
+            # and writes this one a second time.
+            entry = known_contacts.get("all", {}).get(recipient.lower())
+            if entry:
+                known_contacts["all"][recipient.lower()] = (entry[0], found["mobile"])
         for email, mobile in found["other_mobiles"].items():
             _update_mobile_anywhere(sheet, known_contacts, email, mobile)
         for note in found["notes"]:
@@ -188,6 +193,11 @@ def check_sender(sender: dict, include_resolved: bool = False):
         recipient = row["recipient_email"]
         thread_id = row.get("thread_id", "")
         try:
+            if gmail.attachment_blocked(thread_id):
+                log.warning("[%s] Gmail blocked our email to %s (attachment flagged as a virus)", name, recipient)
+                sheet.reset_blocked_send(row["row_number"], recipient, row.get("sequence_step", 0))
+                continue
+
             if gmail.has_bounced(recipient):
                 log.info("[%s] Bounce detected for %s", name, recipient)
                 sheet.mark_bounced(row["row_number"])

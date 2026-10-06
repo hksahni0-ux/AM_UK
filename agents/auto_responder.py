@@ -39,6 +39,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import parseaddr
@@ -65,7 +66,7 @@ log = logging.getLogger(__name__)
 AUTO_REPLY_HEADER = "X-AMUK-Auto-Reply"
 
 AUTO_TYPES = ("no_vacancy", "forwarded", "acknowledged", "apply_via_portal",
-              "role_coming_soon", "referred")
+              "role_coming_soon", "referred", "clarify_speculative")
 
 _TYPE_LABELS = {
     "no_vacancy": "no vacancies, CV on file",
@@ -74,6 +75,7 @@ _TYPE_LABELS = {
     "apply_via_portal": "asked to apply via careers page",
     "role_coming_soon": "relevant role coming soon",
     "referred": "referred to another contact",
+    "clarify_speculative": "asked what the application is for — explained it's speculative, CV attached",
 }
 
 # ── Text cleanup ──────────────────────────────────────────────────────────────
@@ -272,6 +274,14 @@ _GATES = {
         r"would be (best|better) placed|sits with|responsible for)", re.IGNORECASE),
 }
 
+# "Are you applying for a position", "Where's the application. We haven't posted any
+# job advert", "Which role is this for?" — confusion about an unsolicited application.
+_GATES["clarify_speculative"] = re.compile(
+    r"(are you applying|what (are you applying|role|position|job|vacancy)|which (role|position|job|vacancy)|"
+    r"where'?s the application|where is the application|applying for (a|which|what)|"
+    r"(haven't|have not|didn't|did not) (posted|advertised|put out)|no (job )?advert|"
+    r"not (currently )?advertis\w*|i don'?t understand|not sure what (you|this))", re.IGNORECASE)
+
 _COMPANY_WORDS = re.compile(
     r"\b(ltd|limited|group|consult\w*|recruit\w*|agency|team|department|services|"
     r"solutions|plc|inc|llp|partners|hr)\b", re.IGNORECASE)
@@ -297,6 +307,9 @@ _ROUTE_TOOL = {
                     "LinkedIn, or say they can't accept applications by email. "
                     "'role_coming_soon' — they say a relevant role will be advertised/opened soon. "
                     "'referred' — they say a specific named other person is the one to contact. "
+                    "'clarify_speculative' — they're confused about what he is applying for: ask "
+                    "whether he is applying for a position / which role, or point out they haven't "
+                    "advertised any job — and nothing else. "
                     "'needs_human' — anything that asks him something, needs a decision, raises "
                     "sponsorship/visa/salary, is hostile, mixes several of the above in a way a "
                     "short standard reply would mishandle, or you are not sure. "
@@ -406,6 +419,19 @@ def _paragraphs(reply_type: str, first: str, company: str, extras: dict) -> List
             f"Would you be happy to pass my CV on to {who}, or connect us by email? I'd welcome "
             "the chance to discuss how my experience could support the team.",
         ]
+    if reply_type == "clarify_speculative":
+        # Modelled on Prateek's own reply to "Are you applying for a position" (Novanta, 6 Oct).
+        return [
+            f"Hi {first},",
+            "Apologies for the confusion, and thank you for getting back to me.",
+            f"There isn't a specific advertised role. I'm making a speculative application to "
+            f"{company}. I'm a manufacturing and process engineer (MEng, First Class) with over "
+            "five years' experience in process development and validation, scale-up to "
+            "production, and additive manufacturing, and I'm interested in process, manufacturing "
+            f"or R&D engineering opportunities at {company}.",
+            "If anything suitable comes up in your team, or if there's someone better placed for "
+            "me to speak to, I'd be grateful to know. I've attached my CV for reference.",
+        ]
     raise ValueError(f"No template for {reply_type}")
 
 
@@ -499,6 +525,12 @@ def decide(messages: List[dict], own_email: str, company: str, now: datetime,
         return Decision("flag", "couldn't read their message")
     trigger = human_trigger(text) or _strong_trigger(_normalise_text(
         _QUOTE_MARKERS.split(_normalise_text(latest["body"]))[0]))
+    if (trigger == "asks a question" and len(text) <= 400
+            and _GATES["clarify_speculative"].search(text)
+            and not human_trigger(text.replace("?", "."))):    # no OTHER trigger fired
+        # "Which role are you applying for?" — the one question a standard reply answers;
+        # the LLM still has to agree, and any other trigger still wins.
+        trigger = ""
     if trigger:
         return Decision("flag", trigger)
     if has_departure_keywords(text):
@@ -535,6 +567,10 @@ def decide(messages: List[dict], own_email: str, company: str, now: datetime,
                 or _COMPANY_WORDS.search(who)):
             return Decision("flag", "referred elsewhere, but not to a named person")
         extras["referred_name"] = who
+    if reply_type == "clarify_speculative" and role_applied \
+            and role_applied.strip().lower() != "open application":
+        # we DID apply for a specific advertised role — "it's speculative" would be wrong
+        return Decision("flag", f"asked what the application is for (applied for {role_applied})")
     if reply_type == "role_coming_soon":
         role = (routed.get("upcoming_role") or "").strip()
         if role and role in text and len(role) <= 60:
@@ -735,7 +771,20 @@ def _send(gmail: GmailAgent, sender: dict, thread_id: str, latest: dict, message
     msg_id = h.get("message-id", "")
     refs = (h.get("references", "") + " " + msg_id).strip()
 
-    mime = MIMEMultipart("alternative")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(decision.plain, "plain", "utf-8"))
+    alt.attach(MIMEText(decision.html, "html", "utf-8"))
+    mime = alt
+    if decision.reply_type == "clarify_speculative":
+        # the template says "I've attached my CV" — reattach the exact file sent first
+        cv_name, cv_bytes = gmail.get_first_attachment(thread_id)
+        if not cv_bytes:
+            raise RuntimeError("no CV found in the thread to reattach")
+        mime = MIMEMultipart("mixed")
+        mime.attach(alt)
+        part = MIMEApplication(cv_bytes, Name=cv_name)
+        part["Content-Disposition"] = f'attachment; filename="{cv_name}"'
+        mime.attach(part)
     mime["From"] = f"{sender['name']} <{sender['email']}>"
     mime["To"] = decision.to
     mime["Subject"] = subject
@@ -743,8 +792,6 @@ def _send(gmail: GmailAgent, sender: dict, thread_id: str, latest: dict, message
         mime["In-Reply-To"] = msg_id
         mime["References"] = refs
     mime[AUTO_REPLY_HEADER] = decision.reply_type
-    mime.attach(MIMEText(decision.plain, "plain", "utf-8"))
-    mime.attach(MIMEText(decision.html, "html", "utf-8"))
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
     gmail.service.users().messages().send(
         userId="me", body={"raw": raw, "threadId": thread_id},
