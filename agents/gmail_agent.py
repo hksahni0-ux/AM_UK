@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import parseaddr
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -300,14 +301,15 @@ class GmailAgent:
             log.warning("Could not check thread %s before followup: %s", thread_id, exc)
             return ""
 
-    def get_reply_body_in_thread(self, thread_id: str, recipient_email: str) -> str:
+    def get_inbound_messages(self, thread_id: str) -> list:
         """
-        Return concatenated body text of every message in the thread NOT sent by us —
-        i.e. the recipient's reply, or a colleague replying on their behalf. Used to
-        classify reply content (e.g. detecting a "no longer with the company" notice).
+        Every message in the thread NOT sent by us — the recipient's reply, or a
+        colleague replying on their behalf — as [{"from_name", "from_email", "body"}].
+        Bodies are used to classify the reply (e.g. a "no longer with the company"
+        notice); the sender fields tell contact extraction whose signature it is reading.
         """
-        if not thread_id or not recipient_email:
-            return ""
+        if not thread_id:
+            return []
         try:
             thread = (
                 self.service.users()
@@ -316,7 +318,7 @@ class GmailAgent:
                 .execute(num_retries=5)
             )
             own_email = self.sender["email"].lower()
-            bodies = []
+            messages = []
             for msg in thread.get("messages", []):
                 headers = {
                     h["name"].lower(): h["value"]
@@ -326,11 +328,41 @@ class GmailAgent:
                     continue
                 body = self._extract_body_text(msg)
                 if body:
-                    bodies.append(body)
-            return "\n\n---\n\n".join(bodies)
+                    from_name, from_email = parseaddr(headers.get("from", ""))
+                    messages.append({"from_name": from_name, "from_email": from_email.lower(),
+                                     "body": body})
+            return messages
         except Exception as exc:
             log.warning("Could not fetch reply body for thread %s: %s", thread_id, exc)
-            return ""
+            return []
+
+    def get_recent_inbound(self, days: int = 2, limit: int = 50) -> list:
+        """Every message received in the last `days` days (not ours, no bounces), as
+        [{"from_name", "from_email", "body"}] — for reading signatures on replies the
+        per-row poll no longer looks at (resolved rows, conversations carried on by hand)."""
+        try:
+            q = f"newer_than:{days}d -from:me -from:mailer-daemon -from:postmaster"
+            result = (
+                self.service.users().messages()
+                .list(userId="me", q=q, maxResults=limit)
+                .execute(num_retries=5)
+            )
+            messages = []
+            for m in result.get("messages", []):
+                full = (
+                    self.service.users().messages()
+                    .get(userId="me", id=m["id"], format="full")
+                    .execute(num_retries=5)
+                )
+                from_header = next((h["value"] for h in full.get("payload", {}).get("headers", [])
+                                    if h["name"].lower() == "from"), "")
+                from_name, from_email = parseaddr(from_header)
+                messages.append({"from_name": from_name, "from_email": from_email.lower(),
+                                 "body": self._extract_body_text(full)})
+            return messages
+        except Exception as exc:
+            log.warning("Could not list recent inbound mail: %s", exc)
+            return []
 
     def get_ooo_reply(self, thread_id: str, recipient_email: str, after_date: str = ""):
         """
@@ -338,10 +370,10 @@ class GmailAgent:
         Searches by sender address (OOO replies from Exchange/Outlook arrive as
         separate threads, not threaded with the original sent email).
         after_date: Gmail date filter string e.g. "2026/08/01" — only OOOs after this date.
-        Returns (is_ooo: bool, body_text: str).
+        Returns (is_ooo: bool, body_text: str, from_header: str).
         """
         if not recipient_email:
-            return False, ""
+            return False, "", ""
         try:
             subject_terms = " OR ".join(
                 f'subject:"{p}"' for p in _OOO_SUBJECT_PATTERNS
@@ -356,17 +388,29 @@ class GmailAgent:
             )
             messages = result.get("messages", [])
             # Fallback: search by username only — catches OOOs sent from a different domain
-            # (e.g. tom.baynes@afd-systems.com replying to tom.baynes@airframedesigns.com)
+            # (e.g. tom.baynes@afd-systems.com replying to tom.baynes@airframedesigns.com).
+            # Gmail's from: matches any part of the sender's name or address, so "from:ross"
+            # also finds Ross McCullough — only accept an exact username match.
             if not messages and "@" in recipient_email:
-                username = recipient_email.split("@")[0]
+                username = recipient_email.split("@")[0].lower()
                 q2 = f"from:{username} ({subject_terms}){date_filter}"
                 result2 = (
                     self.service.users()
                     .messages()
-                    .list(userId="me", q=q2, maxResults=1)
+                    .list(userId="me", q=q2, maxResults=5)
                     .execute(num_retries=5)
                 )
-                messages = result2.get("messages", [])
+                for m in result2.get("messages", []):
+                    meta = (
+                        self.service.users().messages()
+                        .get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From"])
+                        .execute(num_retries=5)
+                    )
+                    from_header = next((h["value"] for h in meta.get("payload", {}).get("headers", [])
+                                        if h["name"].lower() == "from"), "")
+                    if parseaddr(from_header)[1].lower().split("@")[0] == username:
+                        messages = [m]
+                        break
             if messages:
                 msg_full = (
                     self.service.users()
@@ -374,7 +418,9 @@ class GmailAgent:
                     .get(userId="me", id=messages[0]["id"], format="full")
                     .execute(num_retries=5)
                 )
-                return True, self._extract_body_text(msg_full)
+                from_header = next((h["value"] for h in msg_full.get("payload", {}).get("headers", [])
+                                    if h["name"].lower() == "from"), "")
+                return True, self._extract_body_text(msg_full), from_header
 
             # Fallback: check the actual thread for any OOO reply regardless of sender domain.
             # Catches cases where the OOO arrives from a different address (e.g. afd-systems.com
@@ -395,11 +441,11 @@ class GmailAgent:
                     # Any non-us reply with an OOO subject is from the recipient side
                     if own_email not in from_addr and any(p in subject for p in _OOO_SUBJECT_PATTERNS):
                         body = self._extract_body_text(msg)
-                        return True, body
+                        return True, body, headers.get("from", "")
 
         except Exception as exc:
             log.warning("OOO check failed for %s: %s", recipient_email, exc)
-        return False, ""
+        return False, "", ""
 
     def _extract_body_text(self, msg: dict) -> str:
         """Extract plain text from a Gmail message payload (up to 3000 chars).

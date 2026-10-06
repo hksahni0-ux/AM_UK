@@ -379,11 +379,115 @@ class SheetAgent:
         actual_row = self._live_row_number(recipient_email, row_number) if recipient_email else row_number
         if actual_row != row_number:
             log.warning("OOO mark: row shifted %d → %d (%s)", row_number, actual_row, recipient_email)
+        # Replace only the previous OOO note — other notes (e.g. a mobile or alternative
+        # contact pulled from this same OOO) must survive.
+        existing = self._get_val(self.ws.row_values(actual_row), "comments")
+        kept = [p for p in existing.split(" | ") if p.strip() and not p.startswith("OOO")]
         self._write_updates(actual_row, {
             "next_followup_date": next_followup.strftime("%d %b %Y"),
-            "comments": f"OOO — followup from {next_followup.strftime('%d %b %Y')}",
+            "comments": " | ".join([f"OOO — followup from {next_followup.strftime('%d %b %Y')}"] + kept),
         })
         log.info("Row %d: OOO → next followup %s", actual_row, next_followup)
+
+    # ── contact details pulled from replies (see agents/contact_extractor.py) ──
+
+    def known_contacts(self) -> dict:
+        """{email: (sender, mobile)} for every address in any sender tab — a contact found
+        in a reply is only added when no tab has them yet, since duplicate rows lead to
+        duplicate sends."""
+        contacts = {}
+        book = self.ws.spreadsheet
+        email_header, mobile_header = COLUMNS["recipient_email"], COLUMNS["mobile"]
+        for s in SENDERS:
+            ws = self.ws if s["sheet_name"] == self.sender["sheet_name"] else book.worksheet(s["sheet_name"])
+            values = ws.get_all_values()
+            if not values or email_header not in values[0]:
+                continue
+            col = values[0].index(email_header)
+            mcol = values[0].index(mobile_header) if mobile_header in values[0] else None
+            for r in values[1:]:
+                email = r[col].strip().lower() if col < len(r) else ""
+                if email and email not in contacts:
+                    mobile = r[mcol].strip() if mcol is not None and mcol < len(r) else ""
+                    contacts[email] = (s, mobile)
+        return contacts
+
+    def add_note(self, row_number: int, recipient_email: str, note: str):
+        """Append a note to Comments, once."""
+        actual_row = self._live_row_number(recipient_email, row_number)
+        if actual_row < 2:
+            return
+        existing = self._get_val(self.ws.row_values(actual_row), "comments")
+        if note.lower() in existing.lower():
+            return
+        self._write_updates(actual_row, {"comments": f"{existing} | {note}" if existing else note})
+        log.info("Row %d: note added — %s", actual_row, note)
+
+    def update_mobile(self, row_number: int, recipient_email: str, mobile: str):
+        """Mobile taken from the contact's own signature or OOO — more current than the
+        enrichment data the row was imported with, so it replaces whatever is there."""
+        actual_row = self._live_row_number(recipient_email, row_number)
+        if actual_row < 2:
+            log.warning("No row for %s — mobile %s not saved", recipient_email, mobile)
+            return
+        old = self._get_val(self.ws.row_values(actual_row), "mobile")
+        self._write_updates(actual_row, {"mobile": mobile})
+        log.info("Row %d: mobile %s → %s (from their email)", actual_row, old or "blank", mobile)
+        if old.lower() not in ("", "not revealed"):
+            self.add_note(actual_row, recipient_email, f"mobile was {old}")
+
+    def add_contact_below(self, anchor_email: str, person: dict, note: str,
+                          known_emails: Optional[set] = None) -> bool:
+        """
+        Insert a colleague found in a reply directly under the contact who named them,
+        copying the company-level columns. Status stays blank: with no Thread ID the
+        pipeline treats them as a fresh contact; with the conversation's Thread ID
+        (someone who replied on the contact's behalf) it never cold-emails them.
+        Returns False if they already exist anywhere or the anchor row has gone.
+        known_emails: every address in any tab, if the caller already has it (saves
+        re-reading all three tabs per insert — Sheets allows ~60 reads a minute).
+        """
+        email = person["email"].strip().lower()
+        if email in (known_emails if known_emails is not None else self.known_contacts()):
+            log.info("%s already in the sheet — not adding", email)
+            return False
+        records = self.ws.get_all_values()
+        headers = records[0]
+        email_col = headers.index(COLUMNS["recipient_email"])
+        existing = [r[email_col].strip().lower() if email_col < len(r) else "" for r in records]
+        if email in existing:
+            log.info("%s already in the sheet — not adding", email)
+            return False
+        anchor = existing.index(anchor_email.strip().lower()) + 1 if anchor_email.strip().lower() in existing else 0
+        if not anchor:
+            log.warning("Anchor row for %s not found — not adding %s", anchor_email, email)
+            return False
+        src = records[anchor - 1]
+
+        new_row = [""] * len(headers)
+
+        def put(key, value):
+            col = COLUMNS.get(key)
+            if col in headers:
+                new_row[headers.index(col)] = value
+
+        for key in ("company_name", "company_website", "company_industry",
+                    "tier", "category", "country", "sponsorship"):
+            put(key, self._get_val(src, key))
+        put("first_name", person.get("first_name", ""))
+        put("last_name", person.get("last_name", ""))
+        put("recipient_email", email)
+        put("recipient_job_title", person.get("job_title", ""))
+        put("mobile", person.get("mobile") or "not revealed")
+        put("person_linkedin_url", person.get("linkedin_url", ""))
+        put("comments", note)
+        put("thread_id", person.get("thread_id", ""))
+
+        self.ws.insert_row(new_row, index=anchor + 1,
+                           value_input_option="USER_ENTERED", inherit_from_before=True)
+        log.info("Row %d: added %s %s <%s> below %s", anchor + 1,
+                 person.get("first_name", ""), person.get("last_name", ""), email, anchor_email)
+        return True
 
     def _write_updates(self, row_number: int, updates: dict):
         headers = self._get_headers()
@@ -442,5 +546,9 @@ class SheetAgent:
                 "comments": self._get_val(row, "comments"),
                 "status": status,
                 "reply_status": reply_status,
+                "first_name": self._get_val(row, "first_name"),
+                "last_name": self._get_val(row, "last_name"),
+                "mobile": self._get_val(row, "mobile"),
+                "company_name": self._get_val(row, "company_name"),
             })
         return rows

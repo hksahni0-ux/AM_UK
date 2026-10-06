@@ -21,6 +21,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, timedelta
+from email.utils import parseaddr
 
 socket.setdefaulttimeout(30)  # prevent any socket call hanging after sleep/wake
 
@@ -30,6 +31,7 @@ from config.settings import SENDERS, REPLY_STATUS_RECEIVED, STATUS_FOLLOWUP_INIT
 from agents.sheet_agent import SheetAgent
 from agents.gmail_agent import GmailAgent
 from agents.reply_classifier import classify_reply, has_departure_keywords
+from agents import contact_extractor
 
 _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 _LOG_DIR   = os.path.join(_BASE_DIR, "logs")
@@ -74,6 +76,90 @@ def _parse_gmail_after_date(last_action_date: str) -> str:
     return ""
 
 
+def _collect_contact_details(sheet, row, messages, known_contacts: dict, new_contacts: list):
+    """Mobile from the contact's own signature/OOO → their row now; colleagues they
+    point us to → queued for a new row under theirs. Never blocks reply handling."""
+    recipient = row["recipient_email"]
+    contact = {"first_name": row.get("first_name", ""), "last_name": row.get("last_name", ""),
+               "email": recipient, "mobile": row.get("mobile", "")}
+
+    def load_known():
+        if "all" not in known_contacts:
+            known_contacts["all"] = sheet.known_contacts()
+        known = {email: mobile for email, (_, mobile) in known_contacts["all"].items()}
+        known.update({p["email"]: p.get("mobile", "") for _, p, _ in new_contacts})
+        return known
+
+    try:
+        found = contact_extractor.extract(messages, contact, load_known)
+        if found["mobile"]:
+            sheet.update_mobile(row["row_number"], recipient, found["mobile"])
+            row["mobile"] = found["mobile"]
+        for email, mobile in found["other_mobiles"].items():
+            _update_mobile_anywhere(sheet, known_contacts, email, mobile)
+        for note in found["notes"]:
+            sheet.add_note(row["row_number"], recipient, note)
+        who = f"{contact['first_name']} {contact['last_name']}".strip() or recipient
+        for person in found["people"]:
+            note = f"{person['how'].capitalize()} — via {who}, {date.today():%d %b %Y}"
+            person = {**person, "company": row.get("company_name", ""),
+                      "thread_id": row.get("thread_id", "") if person.get("in_thread") else ""}
+            new_contacts.append((recipient, person, note))
+    except Exception as exc:
+        log.error("Contact extraction failed for %s: %s", recipient, exc)
+
+
+def _update_mobile_anywhere(sheet, known_contacts: dict, email: str, mobile: str):
+    """Update a person's own row, which may be in another sender's tab."""
+    entry = known_contacts["all"].get(email)
+    if not entry:
+        return
+    tab = sheet if entry[0]["sheet_name"] == sheet.sender["sheet_name"] else SheetAgent(entry[0])
+    tab.update_mobile(0, email, mobile)
+    known_contacts["all"][email] = (entry[0], mobile)
+
+
+def _sweep_signatures(sheet, gmail, known_contacts: dict):
+    """
+    Mobile numbers from the signature of ANY recent reply by someone in the sheet —
+    the per-row poll above only reads rows still being followed up, so without this a
+    reply on a "discussion in progress" row, or in a conversation carried on by hand,
+    would never have its number picked up.
+    """
+    for msg in gmail.get_recent_inbound(days=2):
+        if not contact_extractor.has_new_mobile(msg["body"]):
+            continue                      # no mobile at all — skip before touching the sheet
+        if "all" not in known_contacts:
+            known_contacts["all"] = sheet.known_contacts()
+        entry = known_contacts["all"].get(msg["from_email"])
+        if not entry:
+            continue                      # not someone we're tracking
+        try:
+            mobile = contact_extractor.author_mobile(msg, entry[1])
+            if mobile:
+                _update_mobile_anywhere(sheet, known_contacts, msg["from_email"], mobile)
+        except Exception as exc:
+            log.error("Signature check failed for %s: %s", msg["from_email"], exc)
+
+
+def _add_new_contacts(sheet, new_contacts: list, known_contacts: dict):
+    known = set(known_contacts["all"]) if "all" in known_contacts else None
+    for anchor_email, person, note in new_contacts:
+        try:
+            if not person.get("linkedin_url"):
+                url, role = contact_extractor.find_linkedin(
+                    person["first_name"], person["last_name"], person["company"], person["email"])
+                person["linkedin_url"] = url
+                person["job_title"] = person.get("job_title") or role
+            if not person["linkedin_url"]:
+                note += " | LinkedIn URL not found — add manually"
+            if sheet.add_contact_below(anchor_email, person, note, known_emails=known):
+                if known is not None:
+                    known.add(person["email"])
+        except Exception as exc:
+            log.error("Could not add contact %s: %s", person.get("email"), exc)
+
+
 def check_sender(sender: dict, include_resolved: bool = False):
     name = sender["email"]
     log.info("[%s] Checking for replies", name)
@@ -88,8 +174,11 @@ def check_sender(sender: dict, include_resolved: bool = False):
     rows = sheet.get_rows_for_reply_check(include_resolved=include_resolved)
     if not rows:
         log.info("[%s] No rows to check", name)
+        _sweep_signatures(sheet, gmail, {})
         return
 
+    known_contacts = {}    # lazily filled cache: every address in any tab
+    new_contacts = []      # (anchor email, person, note) — inserted after the loop
     log.info("[%s] Checking %d recipients for replies", name, len(rows))
     for row in rows:
         # Small throttle — each row makes 3-4 Gmail API calls back-to-back, and
@@ -113,17 +202,25 @@ def check_sender(sender: dict, include_resolved: bool = False):
             # both the same "Automatic reply" subject shape), so both must be checked.
             bodies = []
             thread_body = ""
+            messages = []
             if gmail.has_reply_in_thread(thread_id, recipient):
-                thread_body = gmail.get_reply_body_in_thread(thread_id, recipient)
+                messages = gmail.get_inbound_messages(thread_id)
+                thread_body = "\n\n---\n\n".join(m["body"] for m in messages)
                 if thread_body:
                     bodies.append(thread_body)
-            _, auto_reply_body = gmail.get_ooo_reply(thread_id, recipient, after_date=after_date)
+            _, auto_reply_body, auto_reply_from = gmail.get_ooo_reply(thread_id, recipient, after_date=after_date)
             if auto_reply_body:
                 bodies.append(auto_reply_body)
+                from_name, from_email = parseaddr(auto_reply_from)
+                messages.append({"from_name": from_name, "from_email": from_email.lower(),
+                                 "body": auto_reply_body})
 
             if not bodies:
                 log.debug("[%s] No reply yet from %s", name, recipient)
                 continue
+
+            # Before classification, since the OOO-already-handled path below skips it.
+            _collect_contact_details(sheet, row, messages, known_contacts, new_contacts)
 
             combined_body = "\n\n---\n\n".join(bodies)
             existing = row.get("next_followup_date")
@@ -196,6 +293,11 @@ def check_sender(sender: dict, include_resolved: bool = False):
                     sheet.mark_ooo(row["row_number"], followup_date, recipient)
         except Exception as exc:
             log.error("[%s] Error checking replies from %s: %s", name, recipient, exc)
+
+    # Inserting a row shifts every row below it, so this waits until no row_number
+    # captured above is still going to be written to.
+    _add_new_contacts(sheet, new_contacts, known_contacts)
+    _sweep_signatures(sheet, gmail, known_contacts)
 
 
 def main():

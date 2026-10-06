@@ -47,6 +47,7 @@ agents/
   email_writer.py        — generates HTML emails via Claude API (Sonnet for initial, Haiku for role selection)
   gmail_agent.py         — sends multipart/mixed email (HTML + plain + CV attachment); OOO detection
   reply_classifier.py    — classify_reply(): single LLM call decides real reply / OOO / left-company for a gathered reply body
+  contact_extractor.py   — pulls the replier's mobile and any alternative contacts out of replies/OOOs; LinkedIn lookup via Exa
   auto_responder.py      — answers routine inbound replies (no vacancies, forwarded, apply via portal, ...) with fixed templates; flags the rest "needs your reply"
 ```
 
@@ -83,6 +84,16 @@ Runs once per cycle after `reply_checker`. Lists each account's inbound mail fro
 
 Guardrails: regex "needs a human" triggers run before the LLM (questions, calls/interviews, sponsorship/visa, GDPR, salary, hostile/do-not-contact, AI remarks); each LLM verdict must also match that type's keyword gate; only the first message from a given person in a thread is ever answered; one auto-reply per thread (X-AMUK-Auto-Reply header + `auto_replies` log tab); 2h minimum / 3-day maximum message age; `AUTO_REPLY_DAILY_LIMIT` per account. `AUTO_REPLY_MODE` in settings: `send` / `dry_run` / `off`. `run_all(mode="dry_run")` is fully read-only.
 
+### Contact details from replies (`agents/contact_extractor.py`)
+
+`reply_checker` passes every inbound message for a row (in-thread replies plus the OOO, each with its From header) to `contact_extractor.extract()` before classifying it:
+- **Mobile** — a UK/Ireland mobile in the author's own signature/OOO (`normalise_mobile()` → `447…`/`3538…`, landlines ignored) replaces the row's Mobile (old value noted in Comments). A colleague who already has a row in any tab gets their own row updated instead.
+- **Alternative contacts** — someone the email points to ("contact X in my absence") or a colleague replying on the contact's behalf becomes a new row directly under the contact (`SheetAgent.add_contact_below`), company columns copied, LinkedIn URL + current role from Exa (`find_linkedin`, accepted only when full name AND company match). Named alternatives get no Thread ID (fresh cold-email target); on-behalf repliers get the conversation's Thread ID (never cold-emailed). Never added if the address exists in any tab.
+- **Signature sweep** — after the per-row loop, `_sweep_signatures()` reads every message received in the last 2 days (`GmailAgent.get_recent_inbound`) and updates the author's Mobile wherever their row is, since the per-row poll only covers rows still being followed up (not "discussion in progress" rows or conversations continued by hand). Regex-gated: only a message with a mobile different from the one on file costs a sheet read or LLM call.
+- A row needs a real name: one written in the email, the From display name, or a first.last address the model marks `is_person`. Unnamed or single-name addresses (phil@, j.feist@) become an "alt contact:" note on the original row; shared mailboxes are skipped.
+
+Guardrails: a regex gate (new mobile or unfamiliar address present) runs before any LLM call, so re-reading a long-running OOO is free; every value the LLM returns must literally appear in the email. Rows are inserted only after the per-row loop, since an insert shifts every row number captured earlier.
+
 ### ATS detection in `research_agent.py`
 
 `_try_ats_api()` scans raw homepage HTML for ATS indicator URLs, then calls the matching platform API (not scraping — structured JSON). Falls back to scraping if the API returns nothing. Workday uses RSS feed. The detection runs twice: on the homepage and again on the careers page (ATS links often only appear on the careers page). Every ATS handler takes a `country` param and filters/labels listings using `get_country_config(country)` (location keywords, Workday location codes, ConnectID/Gaia country filters) — see `COUNTRY_CONFIG` in `config/settings.py`.
@@ -106,5 +117,6 @@ OAuth tokens are per-account at `config/tokens/token_<account>.json`. Run `setup
 - `SheetAgent.__init__` always uses `SENDERS[0]`'s credentials to open the spreadsheet (owner access), regardless of which sender is being processed — only the worksheet tab differs per sender
 - `mark_sent()` always re-fetches the live row number for the recipient email before writing, because `sort_all_sheets` may run between row selection and the write-back
 - A blank-status row that already has a Thread ID (a colleague added by hand to an existing conversation) is never treated as a fresh cold-email target
+- `get_ooo_reply`'s username-only fallback (OOO from another domain) only accepts an exact local-part match — Gmail's `from:ross` also matches "Ross McCullough", which once attributed one contact's OOO to another
 - Lock files (`logs/*.lock`) prevent concurrent instances of the same script; a running instance causes the new one to `sys.exit(0)` silently
 - The cron runs in IST (machine timezone) but all send-window logic uses UK BST via pytz; the script self-exits if called outside the active window
