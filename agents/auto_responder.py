@@ -366,23 +366,23 @@ def _paragraphs(reply_type: str, first: str, company: str, extras: dict) -> List
             f"experience could support {company}.",
         ]
     if reply_type == "apply_via_portal":
+        # No direct "please forward my CV" ask: they've just said the portal is the way in,
+        # and pushing past that reads as not listening — in Prateek's own threads it drew
+        # irritation or silence, while effort + a soft "keep me in mind" landed better.
         role = extras.get("role_applied", "")
-        including = f", including the {role} role," if role else ""
+        apply_line = (f"I'll apply for the {role} role through {company}'s careers page."
+                      if role else f"I'll apply through {company}'s careers page for any suitable roles.")
         return [
             f"Hi {first},",
-            "Thank you for getting back to me, and for pointing me to the right channel.",
-            f"I do keep a close eye on {company}'s vacancies{including} and apply through the "
-            "official route. Alongside that, I make a point of reaching out directly to people "
-            "at the companies I'd genuinely like to join. Applying from overseas, I've found that "
-            "a portal application on its own rarely reaches a hiring manager, so rather than rely "
-            "on a single online form, I put in the extra work to research each company, follow "
-            "what it's doing and introduce myself personally.",
-            f"{company} is one of the companies I've specifically chosen to approach this way, and "
-            "I'd be very grateful for any chance for the right person to see my profile. If you're "
-            "able to pass my CV on to the relevant hiring manager or recruiter, or let me know who "
-            f"the best person to speak to would be, that would mean a lot. My portfolio at "
-            f"{CANDIDATE_WEBSITE} also gives a quick overview of the projects I've delivered.",
-            "Thank you again for your time and help.",
+            f"Thank you for getting back to me, and for pointing me to the right channel. {apply_line}",
+            "As I'm applying from overseas, I also make a point of researching the companies I'd "
+            "genuinely like to join and introducing myself to the people there directly, rather than "
+            f"relying on an online form alone. {company} is one of the companies I've specifically "
+            "chosen to approach this way.",
+            "If a role comes up that you think would suit my background, I'd be grateful if you'd "
+            f"keep me in mind. My portfolio at {CANDIDATE_WEBSITE} also gives a quick overview of the "
+            "projects I've delivered.",
+            "Thank you again for your time.",
         ]
     if reply_type == "role_coming_soon":
         role = extras.get("upcoming_role", "")
