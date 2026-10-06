@@ -10,6 +10,7 @@ MIME structure:
 """
 
 import base64
+import html
 import logging
 import os
 import re
@@ -31,6 +32,18 @@ _OOO_SUBJECT_PATTERNS = [
     "away from office", "on leave", "on annual leave", "on vacation",
     "i am away", "i'm away", "i am out", "i'm out", "ooo",
 ]
+
+
+def _html_to_text(html_body: str) -> str:
+    """Rough HTML → text: enough for reply classification, not for display."""
+    if not html_body:
+        return ""
+    text = re.sub(r"(?is)<(style|script|head)[^>]*>.*?</\1>", " ", html_body)
+    text = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d)>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t ]+", " ", text)
+    return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
 def _load_creds(token_file: str) -> Credentials:
@@ -254,6 +267,39 @@ class GmailAgent:
             log.warning("Could not check thread %s for reply: %s", thread_id, exc)
             return False
 
+    def inbound_since_last_sent(self, thread_id: str) -> str:
+        """
+        Body text of every non-self message that arrived after our most recent
+        message in the thread ("" if none). Used as a last check right before a
+        followup goes out: reply_checker only runs after each send cycle, so a reply
+        that lands overnight would otherwise get a followup at the first run of the day.
+        """
+        if not thread_id:
+            return ""
+        try:
+            thread = (
+                self.service.users().threads()
+                .get(userId="me", id=thread_id, format="full")
+                .execute(num_retries=5)
+            )
+            own_email = self.sender["email"].lower()
+            bodies = []
+            for msg in thread.get("messages", []):
+                from_header = {
+                    h["name"].lower(): h["value"]
+                    for h in msg.get("payload", {}).get("headers", [])
+                }.get("from", "").lower()
+                if own_email in from_header:
+                    bodies = []          # only what came after our latest message counts
+                    continue
+                if "mailer-daemon" in from_header or "postmaster" in from_header:
+                    continue
+                bodies.append(self._extract_body_text(msg) or "(no text)")
+            return "\n\n---\n\n".join(bodies)
+        except Exception as exc:
+            log.warning("Could not check thread %s before followup: %s", thread_id, exc)
+            return ""
+
     def get_reply_body_in_thread(self, thread_id: str, recipient_email: str) -> str:
         """
         Return concatenated body text of every message in the thread NOT sent by us —
@@ -356,15 +402,22 @@ class GmailAgent:
         return False, ""
 
     def _extract_body_text(self, msg: dict) -> str:
-        """Extract plain text from a Gmail message payload (up to 3000 chars)."""
-        def _walk(part):
-            if part.get("mimeType") == "text/plain":
+        """Extract plain text from a Gmail message payload (up to 3000 chars).
+        Falls back to the HTML part, converted to text, for HTML-only messages —
+        some mail clients send no text/plain part at all, and those replies used to
+        read as empty and never get recorded."""
+        def _walk(part, mime):
+            if part.get("mimeType") == mime:
                 data = part.get("body", {}).get("data", "")
                 if data:
                     return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-            for sub in part.get("parts", []):
-                result = _walk(sub)
+            for sub in part.get("parts", []) or []:
+                result = _walk(sub, mime)
                 if result:
                     return result
             return ""
-        return _walk(msg.get("payload", {}))[:3000]
+        payload = msg.get("payload", {})
+        text = _walk(payload, "text/plain")
+        if not text:
+            text = _html_to_text(_walk(payload, "text/html"))
+        return text[:3000]

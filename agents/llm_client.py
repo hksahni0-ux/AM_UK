@@ -48,12 +48,17 @@ _NVIDIA_FALLBACK_MODEL = {
 }
 
 
+_NVIDIA_MAX_RETRIES = 3
+_NVIDIA_TRANSIENT = (429, 500, 502, 504)
+
+
 def _nvidia_post(payload: dict) -> dict:
     """POST to the NVIDIA NIM chat/completions endpoint.
 
-    Retries once on 429/timeout against the same model. On a 503 (backend
-    overloaded) for a model with a configured fallback, retries once more
-    against that fallback model instead of failing the call outright.
+    Retries up to _NVIDIA_MAX_RETRIES times, with backoff, on timeouts and on
+    transient statuses (429 rate limit, 500/502/504 server hiccups) — a single
+    500 used to abort a whole CV tailoring. On a 503, or once retries on a 5xx are
+    used up, a model with a configured fallback switches to that model instead.
     """
     model = payload["model"]
     fallback_model = _NVIDIA_FALLBACK_MODEL.get(model)
@@ -69,18 +74,22 @@ def _nvidia_post(payload: dict) -> dict:
                 timeout=180,
             )
         except requests.exceptions.Timeout:
-            if attempt == 0:
+            if attempt < _NVIDIA_MAX_RETRIES:
                 attempt += 1
                 continue
             raise
 
-        if resp.status_code == 429 and attempt == 0:
-            time.sleep(2)
+        if resp.status_code in _NVIDIA_TRANSIENT and attempt < _NVIDIA_MAX_RETRIES:
             attempt += 1
+            delay = 2 * attempt if resp.status_code != 429 else 5 * attempt
+            log.warning("NVIDIA %d on %s — retry %d/%d in %ds",
+                        resp.status_code, payload["model"], attempt, _NVIDIA_MAX_RETRIES, delay)
+            time.sleep(delay)
             continue
 
-        if resp.status_code == 503 and fallback_model and not used_fallback:
-            log.warning("NVIDIA 503 on %s — retrying once with fallback %s", model, fallback_model)
+        if resp.status_code in (500, 502, 503, 504) and fallback_model and not used_fallback:
+            log.warning("NVIDIA %d on %s — switching to fallback %s",
+                        resp.status_code, model, fallback_model)
             payload = {**payload, "model": fallback_model}
             used_fallback = True
             attempt += 1

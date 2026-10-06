@@ -25,6 +25,7 @@ _LEFT_COMPANY_TRIGGERS = [
     "has left the company", "has left the organisation", "has left the organization",
     "left the business", "is no longer", "does not work here", "doesn't work here",
     "no longer part of", "moved on from", "no longer be with",
+    "no longer work", "has retired", "have retired",
 ]
 
 

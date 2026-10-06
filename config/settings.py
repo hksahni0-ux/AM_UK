@@ -65,6 +65,7 @@ STATUS_DISCUSSION           = "discussion in progress"
 STATUS_NOT_INTERESTED       = "not interested"
 STATUS_BOUNCED              = "bounced"
 STATUS_NO_LONGER_WITH_COMPANY = "no longer with company"
+STATUS_NO_ROLE              = "no role at present"
 REPLY_STATUS_RECEIVED       = "reply received"
 
 # ── Campaign settings ─────────────────────────────────────────────────────────
@@ -86,6 +87,15 @@ MAX_SEQUENCE         = 3       # total emails per recipient (1 initial + 2 follo
 PAUSE_UK_FRESH_SENDS = True
 
 TIMEZONE             = "Europe/London"
+
+# ── Automatic replies to inbound responses (agents/auto_responder.py) ─────────
+# "send" replies directly; "dry_run" only logs what would have been sent;
+# "off" disables the step entirely.
+AUTO_REPLY_MODE            = "send"
+AUTO_REPLY_DAILY_LIMIT     = 5     # per sender account, per UK calendar day
+AUTO_REPLY_MIN_AGE_HOURS   = 2     # wait at least this long after their message
+AUTO_REPLY_MAX_AGE_DAYS    = 3     # never answer anything older than this
+AUTO_REPLY_LOG_SHEET       = "auto_replies"
 
 # ── Send windows (UK local time — pytz handles BST/GMT automatically) ────────
 # Mon–Thu: single window 10:00–16:00
@@ -115,6 +125,7 @@ LLM_MODELS = {
         "link_pick":        "claude-haiku-4-5-20251001",
         "ooo_extract":      "claude-haiku-4-5-20251001",
         "left_company_check": "claude-haiku-4-5-20251001",
+        "reply_route":      "claude-sonnet-4-6",
     },
     "nvidia": {
         "email_write":      "nvidia/nemotron-3-ultra-550b-a55b",
@@ -126,6 +137,9 @@ LLM_MODELS = {
         # nano was too liberal on this nuanced judgment call (flagged plain declines
         # as "left the company") — use the larger model, this task runs rarely.
         "left_company_check": "nvidia/nemotron-3-super-120b-a12b",
+        # Decides whether an outbound reply goes out at all — same reasoning as
+        # left_company_check: a nuanced judgment, so not the nano tier.
+        "reply_route":      "nvidia/nemotron-3-super-120b-a12b",
     },
 }
 

@@ -47,6 +47,7 @@ agents/
   email_writer.py        — generates HTML emails via Claude API (Sonnet for initial, Haiku for role selection)
   gmail_agent.py         — sends multipart/mixed email (HTML + plain + CV attachment); OOO detection
   reply_classifier.py    — classify_reply(): single LLM call decides real reply / OOO / left-company for a gathered reply body
+  auto_responder.py      — answers routine inbound replies (no vacancies, forwarded, apply via portal, ...) with fixed templates; flags the rest "needs your reply"
 ```
 
 ### Flow per email cycle
@@ -56,7 +57,9 @@ agents/
 3. For fresh emails: `research_agent.find_matching_role(company_website, company_name, country=row["country"])` fetches the company homepage, detects the ATS platform (Greenhouse, Lever, Workable, Ashby, BambooHR, Workday, etc.), pulls job listings via API filtered to the row's country, and asks Claude Sonnet to pick the best-matching role in that country
 4. `email_writer.write_email()` generates the email with the appropriate sequence step (initial / followup 1 / followup 2), then `GmailAgent.send_email()` sends it
 5. `SheetAgent.mark_sent()` re-fetches the live row number before writing (guards against sort shifting rows between read and write)
-6. After all senders complete: `sheet_sort`, `reply_checker`, `expire_completed_sequences` (per sender — marks contacts `not interested` once their post-final-send checkpoint passes with no reply), and `log_writer` run sequentially
+6. After all senders complete: `sheet_sort`, `reply_checker`, `auto_responder.run_all()`, `expire_completed_sequences` (per sender — marks contacts `not interested` once their post-final-send checkpoint passes with no reply), and `log_writer` run sequentially
+
+Before any followup is sent, `process_sender()` checks the thread for messages that arrived after our last email (`GmailAgent.inbound_since_last_sent`) and classifies them: a real reply or departure notice cancels the send and updates the row; an out-of-office lets it proceed. This closes the gap where a reply arriving overnight got a followup at the first run of the day (reply_checker only runs *after* the sends).
 
 ### Key configuration (`config/settings.py`)
 
@@ -69,10 +72,16 @@ agents/
 
 ### Sheet status state machine
 
-`status` column values (all lowercase): blank → `followup initiated` → `bounced` / `discussion in progress` / `no longer with company` / `not interested`  
+`status` column values (all lowercase): blank → `followup initiated` → `bounced` / `discussion in progress` / `no role at present` / `no longer with company` / `not interested`  
 `reply_status`: blank → `reply received`
 
 `followup initiated` is reused for the post-final-send waiting period: after the last (3rd) send, `mark_sent()` still schedules a `next_followup_date` (5 working days out) and leaves status as `followup initiated` — it just isn't picked up for another send since `sequence_step >= MAX_SEQUENCE`. Once that checkpoint date passes with still no reply, `email_runner.py`'s post-cycle `expire_completed_sequences()` step (one call per sender, after `reply_checker` runs) flips the row to `not interested`.
+
+### Automatic replies (`agents/auto_responder.py`)
+
+Runs once per cycle after `reply_checker`. Lists each account's inbound mail from the last few days, matches threads to sheet rows by Thread ID, and for the newest message in each thread decides `reply` / `flag` / `skip` via `decide()` (pure apart from one LLM call, so it can be replayed against past threads). Reply types with fixed templates modelled on Prateek's own manual replies: `no_vacancy` (row → `no role at present`), `forwarded`, `acknowledged`, `apply_via_portal`, `role_coming_soon`, `referred`. Everything else is flagged in Comments as `needs your reply (...)`.
+
+Guardrails: regex "needs a human" triggers run before the LLM (questions, calls/interviews, sponsorship/visa, GDPR, salary, hostile/do-not-contact, AI remarks); each LLM verdict must also match that type's keyword gate; only the first message from a given person in a thread is ever answered; one auto-reply per thread (X-AMUK-Auto-Reply header + `auto_replies` log tab); 2h minimum / 3-day maximum message age; `AUTO_REPLY_DAILY_LIMIT` per account. `AUTO_REPLY_MODE` in settings: `send` / `dry_run` / `off`. `run_all(mode="dry_run")` is fully read-only.
 
 ### ATS detection in `research_agent.py`
 
@@ -96,5 +105,6 @@ OAuth tokens are per-account at `config/tokens/token_<account>.json`. Run `setup
 
 - `SheetAgent.__init__` always uses `SENDERS[0]`'s credentials to open the spreadsheet (owner access), regardless of which sender is being processed — only the worksheet tab differs per sender
 - `mark_sent()` always re-fetches the live row number for the recipient email before writing, because `sort_all_sheets` may run between row selection and the write-back
+- A blank-status row that already has a Thread ID (a colleague added by hand to an existing conversation) is never treated as a fresh cold-email target
 - Lock files (`logs/*.lock`) prevent concurrent instances of the same script; a running instance causes the new one to `sys.exit(0)` silently
 - The cron runs in IST (machine timezone) but all send-window logic uses UK BST via pytz; the script self-exits if called outside the active window

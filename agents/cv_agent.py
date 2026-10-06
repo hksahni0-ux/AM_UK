@@ -27,7 +27,10 @@ across all jobs. If a genuinely new/misattributed figure shows up, the whole
 attempt is retried with that called out; after enough failed attempts, tailoring
 is abandoned and the caller falls back to the original CV.
 
-The one-page constraint is enforced for real: after each rewrite the docx is
+The one-page constraint is enforced before rendering as well as after: every
+bullet must fit one printed line (the master's longest bullet sets the budget),
+over-long ones get one targeted shortening pass and otherwise keep the original
+wording, and the skills line is trimmed to the master's length. Then the docx is
 converted to PDF and its page count is checked. If it runs over one page, Claude
 is asked again with an explicit "shorten it" instruction, up to a few attempts;
 if it still won't fit, tailoring is abandoned and the caller falls back to the
@@ -317,20 +320,285 @@ def _unevidenced_skills(vocabulary: set, new_skills: list) -> list:
     return flagged
 
 
+# Standards/certification codes ("ISO 13485", "AS9100", "IATF 16949") — the figure check above
+# can't see these, and a tailored CV once claimed "ISO 9001/AS9100" straight from the job ad.
+_STANDARD_RE = re.compile(
+    r"\b(?:ISO|IEC|AS|EN|IATF|ASTM|BS|ANSI|ASME|MIL|DIN|NADCAP|API)[\s\-]?\d{2,}(?:[\-:/]\d+)*",
+    re.IGNORECASE,
+)
+
+
+def _standards(text: str) -> set:
+    return {re.sub(r"[\s\-]", "", m.group(0)).upper() for m in _STANDARD_RE.finditer(text)}
+
+
+# Words that legitimately appear in tailored prose without being a claim about experience.
+_GENERIC_OK = frozenset({
+    "role", "roles", "team", "teams", "experience", "experienced", "expert", "expertise",
+    "proven", "record", "track", "years", "year", "strong", "skills", "skilled", "ability",
+    "deliver", "delivered", "delivering", "drive", "driving", "drove", "lead", "leading", "led",
+    "support", "supporting", "enable", "enabling", "ensure", "ensuring", "improve", "improving",
+    "improvement", "improvements", "new", "high", "end", "key", "including", "focus", "focused",
+    "across", "through", "based", "related", "relevant", "management", "manage", "managed",
+    "managing", "engineer", "engineering", "senior", "results", "impact", "projects", "project",
+})
+# Credentials that must already be in the real CV to be claimed at all.
+_CREDENTIAL_RE = re.compile(
+    r"\b(black belt|green belt|yellow belt|chartered|certified|certification|ceng|pmp|prince2|"
+    r"phd|licensed|accredited)\b", re.IGNORECASE)
+
+
+def _stem(tok: str) -> str:
+    if tok.endswith("ies") and len(tok) > 5:        # technologies → technology
+        return tok[:-3] + "y"
+    for suf in ("ization", "isation", "ations", "ation", "ments", "ment", "ings", "ing", "ed", "es", "s"):
+        if tok.endswith(suf) and len(tok) - len(suf) >= 4:
+            return tok[:-len(suf)]
+    return tok
+
+
+def _jd_borrowed_terms(new_text: str, cv_text: str, jd_text: str) -> set:
+    """
+    Words the rewrite took from the job description that the real CV never uses —
+    "catheter", "CFR", "LPBF": the model presenting the employer's domain as Prateek's
+    own experience. Stemmed, so 'validation'/'validated' count as the same word.
+    """
+    cv = {_stem(t) for t in _content_tokens(cv_text)}
+    jd = {_stem(t) for t in _content_tokens(jd_text)}
+    borrowed = set()
+    for tok in _content_tokens(new_text):
+        st = _stem(tok)
+        if tok in _GENERIC_OK or st in cv or st not in jd or tok.isdigit():
+            continue
+        borrowed.add(tok)
+    return borrowed
+
+
+def _well_formed(result: dict, job_blocks: list) -> bool:
+    """The rewrite has one entry per job, each with a list of bullet strings — the NVIDIA
+    models sometimes return jobs as bare strings or drop a job, which used to crash."""
+    jobs = result.get("jobs") if isinstance(result, dict) else None
+    if not isinstance(jobs, list) or len(jobs) != len(job_blocks):
+        return False
+    for j, block in zip(jobs, job_blocks):
+        bullets = j.get("bullets") if isinstance(j, dict) else None
+        if not isinstance(bullets, list) or len(bullets) != len(block["_bullet_texts"]) \
+                or not all(isinstance(b, str) and b.strip() for b in bullets):
+            return False
+    return isinstance(result.get("summary", ""), str)
+
+
+def _misattributed_bullets(job_blocks: list, result: dict, jd_text: str, cv_text: str = "") -> list:
+    """
+    Bullets that attach another part of the CV to this job — a Concentrix "response
+    time / customer satisfaction" bullet landing under Precise Axis, or "real-time SPC
+    monitoring" added to a job whose real bullets never mention SPC. The figure check
+    can't see this when nothing numeric moved. A bullet is flagged when it uses 2+
+    terms that exist elsewhere in the real CV (other jobs, summary, skills) but not in
+    that job's own original bullets — and that the job ad didn't ask for in other words.
+    """
+    own = [{_stem(t) for t in _content_tokens(" ".join(b["_bullet_texts"]))} for b in job_blocks]
+    elsewhere_all = {_stem(t) for t in _content_tokens(cv_text)} if cv_text else set().union(*own)
+    jd = {_stem(t) for t in _content_tokens(jd_text)}
+    flagged = []
+    for ji, proposed in enumerate(result.get("jobs") or []):
+        if ji >= len(own):
+            break
+        for text in proposed.get("bullets") or []:
+            foreign = {t for t in _content_tokens(text)
+                       if t not in _GENERIC_OK and _stem(t) in elsewhere_all
+                       and _stem(t) not in own[ji] and _stem(t) not in jd}
+            if len(foreign) >= 2:
+                flagged.append((job_blocks[ji]["context"].split(" — ")[0].split("  ")[0], text, sorted(foreign)))
+    return flagged
+
+
+def _repair_honesty(result: dict, job_blocks: list, summary_original: str, cv_text: str,
+                    jd_text: str, original_standards: set) -> int:
+    """
+    Surgical version of the honesty checks: instead of throwing away a whole rewrite
+    because one bullet borrowed "catheter" from the job ad, put that one bullet back to
+    its original wording (always true, always fits). A piece fails if it borrows job-ad
+    terms the CV never uses, claims a credential or standard he doesn't have, carries
+    another job's facts, or introduces subject-matter words found nowhere in the CV.
+    Same for the summary (one new word tolerated); skills that fail are dropped.
+    Returns how many pieces were repaired.
+    """
+    def dishonest(text: str, novel_allowed: int = 0) -> bool:
+        return bool(_jd_borrowed_terms(text, cv_text, jd_text) or _invented_credentials(text, cv_text)
+                    or (_standards(text) - original_standards)
+                    or len(_novel_terms(text, cv_text)) > novel_allowed)
+
+    repaired = 0
+    moved = {(job_ctx, text) for job_ctx, text, _ in _misattributed_bullets(job_blocks, result, jd_text, cv_text)}
+    for ji, (block, proposed) in enumerate(zip(job_blocks, result.get("jobs") or [])):
+        ctx = block["context"].split(" — ")[0].split("  ")[0]
+        bullets = proposed.get("bullets") or []
+        for bi, text in enumerate(bullets):
+            if bi < len(block["_bullet_texts"]) and (dishonest(text) or (ctx, text) in moved):
+                bullets[bi] = block["_bullet_texts"][bi]
+                repaired += 1
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary_original and dishonest(summary, novel_allowed=1):
+        result["summary"] = summary_original
+        repaired += 1
+    skills = result.get("skills")
+    if isinstance(skills, list):
+        kept = [x for x in skills if not dishonest(str(x))]
+        repaired += len(skills) - len(kept)
+        result["skills"] = kept
+    return repaired
+
+
+# Phrasing words a rewrite may introduce freely — how an achievement is told, not what it was.
+_PHRASING_OK = frozenset({
+    "gain", "gains", "reduction", "reductions", "saving", "savings", "boost", "lift", "cut", "cuts",
+    "drive", "drove", "secure", "form", "accelerate", "raise", "raised", "achieve", "achieved",
+    "deliver", "scores", "outcomes", "efficient", "efficiently", "measurable", "successful",
+    "successfully", "consistent", "robust", "faster", "rapidly", "overall", "total", "direct",
+    "directly", "efficiency", "hands", "via", "while", "both", "each",
+})
+
+
+def _novel_terms(text: str, cv_text: str) -> set:
+    """
+    Subject-matter words in a rewrite that the real CV never uses at all — "aerospace
+    output", "rapid prototyping", "precision components": detail invented out of thin
+    air rather than borrowed from the job ad. Verb forms (-ing/-ed) and general
+    phrasing words are allowed; the claim lives in the nouns.
+    """
+    cv = {_stem(t) for t in _content_tokens(cv_text)}
+    return {t for t in _content_tokens(text)
+            if _stem(t) not in cv and t not in _GENERIC_OK and t not in _PHRASING_OK
+            and not t.isdigit() and not re.search(r"(ing|ed)$", t)}
+
+
+def _invented_credentials(new_text: str, cv_text: str) -> set:
+    real = {m.lower() for m in _CREDENTIAL_RE.findall(cv_text)}
+    return {m.lower() for m in _CREDENTIAL_RE.findall(new_text)} - real
+
+
+_SHORTEN_SCHEMA = {
+    "name": "shortened",
+    "description": "Rewritten, shorter CV lines.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"lines": {
+            "type": "array", "items": {"type": "string"},
+            "description": "One rewritten line per input, same order, each within its max_length.",
+        }},
+        "required": ["lines"],
+    },
+}
+
+
+def _shorten_lines(lines: list, limit: int) -> list:
+    """
+    Targeted call to bring specific over-long lines under `limit` characters. The
+    NVIDIA models echo lines back unchanged when simply asked to "shorten to N
+    characters" — telling them each line's current length and how much must go
+    is what actually gets words removed. Aims a little under the limit for margin.
+    """
+    target = max(40, limit - 8)
+    items = [{"line": l, "current_length": len(l), "max_length": target,
+              "must_remove_at_least": max(1, len(l) - target)} for l in lines]
+    prompt = (
+        "These CV bullet lines are TOO LONG to fit on one printed line. Rewrite each one so it "
+        "is no longer than its max_length characters (spaces count). You MUST actually remove "
+        "words — returning a line unchanged or longer is a failure. Keep the figures (e.g. £30k, "
+        "30%) and the main achievement; drop trailing clauses, adjectives and filler first. "
+        "Never add anything new.\n\n" + json.dumps(items, indent=2, ensure_ascii=False)
+    )
+    out = llm_client.complete_tool("cv_write", prompt, _SHORTEN_SCHEMA, max_tokens=1500).get("lines") or []
+    if len(out) != len(lines):
+        return lines
+    return [o if isinstance(o, str) and o.strip() else l for o, l in zip(out, lines)]
+
+
+def _trim_trailing_clause(text: str, limit: int) -> str:
+    """Deterministic last resort before reverting: drop trailing ', enabling …' /
+    ' — …' clauses (where tailoring tends to bolt on its framing) until it fits."""
+    while len(text) > limit:
+        cut = max(text.rfind(", "), text.rfind(" — "), text.rfind(" - "))
+        if cut < 30:
+            break
+        text = text[:cut].rstrip(" ,;—-") + "."
+    return text
+
+
+def _enforce_lengths(result: dict, job_blocks: list, bullet_limit: int, skills_limit: int,
+                     summary_char_limit: int, summary_original: str) -> int:
+    """
+    Makes the rewrite physically fit before it's ever rendered: over-long bullets get
+    up to two targeted shortening passes, then a trailing-clause trim, and any still
+    too long fall back to that slot's original bullet (guaranteed to fit, and a real
+    fact); the skills line is cut from
+    the end (it's ordered most-relevant first); an over-long summary falls back to the
+    original. Returns how many bullets were reverted to the original.
+    """
+    over = []  # (job_i, slot_i, text)
+    for ji, (block, proposed) in enumerate(zip(job_blocks, result.get("jobs") or [])):
+        for bi, text in enumerate(proposed.get("bullets") or []):
+            if isinstance(text, str) and len(text) > bullet_limit:
+                over.append((ji, bi, text))
+    summary = result.get("summary") or ""
+    summary_over = isinstance(summary, str) and len(summary) > summary_char_limit
+
+    reverted = 0
+    if over or summary_over:
+        lines = [t for _, _, t in over] + ([summary] if summary_over else [])
+        limits = [bullet_limit] * len(over) + ([summary_char_limit] if summary_over else [])
+        for _ in range(2):  # a second pass for anything the first left too long
+            todo = [i for i, (l, lim) in enumerate(zip(lines, limits)) if len(l) > lim]
+            if not todo:
+                break
+            for lim in sorted({limits[i] for i in todo}):  # bullets and summary separately
+                group = [i for i in todo if limits[i] == lim]
+                try:
+                    fixed = _shorten_lines([lines[i] for i in group], lim)
+                except Exception as exc:
+                    log.warning("CVAgent: shortening pass failed (%s)", exc)
+                    continue
+                for i, new_text in zip(group, fixed):
+                    if len(new_text) < len(lines[i]) and not _fabricated_figures(lines[i], new_text):
+                        lines[i] = new_text
+        if summary_over:
+            new_summary = lines.pop()
+            result["summary"] = new_summary if len(new_summary) <= summary_char_limit else summary_original
+        for (ji, bi, _), new_text in zip(over, lines):
+            block = job_blocks[ji]
+            new_text = _trim_trailing_clause(new_text, bullet_limit)
+            if len(new_text) <= bullet_limit:
+                result["jobs"][ji]["bullets"][bi] = new_text
+            else:
+                result["jobs"][ji]["bullets"][bi] = block["_bullet_texts"][bi] \
+                    if bi < len(block["_bullet_texts"]) else new_text
+                reverted += 1
+
+    skills = result.get("skills")
+    if isinstance(skills, list):
+        while len(skills) > 1 and len(", ".join(str(x) for x in skills)) > skills_limit:
+            skills.pop()
+    return reverted
+
+
 # ── Claude call ────────────────────────────────────────────────────────────────
 
 def _ask_claude(summary_word_ceiling_base, job_blocks, skills_items, role_title, role_desc, company,
-                 industry, summary_tags: list, shorten_hint: str = "", length_scale: float = 1.0) -> dict:
+                 industry, summary_tags: list, shorten_hint: str = "", length_scale: float = 1.0,
+                 bullet_char_limit: int = 100, skills_char_limit: int = 500) -> dict:
+    bullet_limit = max(40, int(bullet_char_limit * length_scale))
     jobs_payload = [
         {
             "context": b["context"],
             "bullet_slots": len(b["_bullet_texts"]),
-            "max_characters_per_slot": [max(20, int(len(t) * length_scale)) for t in b["_bullet_texts"]],
+            "max_characters_per_slot": [bullet_limit] * len(b["_bullet_texts"]),
             "fact_tags_per_bullet": b["_fact_tags"],
         }
         for b in job_blocks
     ]
     summary_word_ceiling = max(15, int(summary_word_ceiling_base * length_scale))
+    skills_limit = max(150, int(skills_char_limit * length_scale))
     if role_desc:
         jd_instruction = f"""
 STEP 1 — Before rewriting anything, read the job description below and pull out the specific
@@ -343,7 +611,11 @@ your rewrite — in the summary, the relevant bullet, and/or the skills reorderi
 actually helps with ATS keyword matching — generic "match the tone" rewriting is not enough.
 
 Never use a keyword from the job description that has no real match in the original CV — that
-would be fabrication, not tailoring.
+would be fabrication, not tailoring. In particular never name the employer's product, domain,
+regulation or industry (e.g. "catheter", "FDA 21 CFR 820", "medical devices", "LPBF") as something
+Prateek has worked on unless his CV already says so, and never add a credential (Black Belt,
+certified, chartered, ...) he doesn't list. Every attempt is checked word-by-word against his real
+CV, and any job-ad term he has never used gets the whole CV rejected.
 
 JOB DESCRIPTION:
 {role_desc}
@@ -390,10 +662,11 @@ use must be one that genuinely appears among that job's own tags — never a fig
 nothing he'd struggle to back up when asked about it in an interview.
 
 The master CV is already at exactly one page with no spare room, so length is a HARD CEILING, not a
-target — going over means the CV silently gets rejected and the original is sent instead. For the
-summary: {summary_word_ceiling} words MAXIMUM (shorter is fine). For each bullet: its slot's
-max_characters_per_slot value is the MAXIMUM length for whatever you put in that slot (count characters
-as you write; shorter is fine). Never exceed these — use the space as effectively as possible within it.
+target. Every bullet is exactly ONE printed line on the page — a bullet that wraps onto a second line
+pushes the CV onto two pages. For the summary: {summary_word_ceiling} words MAXIMUM (shorter is fine).
+For each bullet: {bullet_limit} characters MAXIMUM including spaces (count as you write; shorter is
+fine) — over-long bullets are cut back to the original wording automatically. For the whole skills
+line: {skills_limit} characters MAXIMUM — drop the least relevant skills rather than exceed it.
 {shorten_hint}
 {jd_instruction}
 Target role: {role_title}
@@ -553,16 +826,34 @@ def tailor_cv(row: dict, job: dict, row_number, out_dir: Optional[str] = None) -
         original_full_text = _collect_text(base_doc, summary_idx, job_blocks)
         summary_word_ceiling_base = len(summary_original.split()) if summary_idx is not None else 60
         skills_vocabulary = _skills_vocabulary(base_doc, summary_idx, job_blocks, skills_items)
+        # Every master bullet fits on one printed line, so the longest one is the line's real
+        # capacity; 95% of it leaves margin for wider characters. Same idea for the skills line
+        # and summary: never longer than the master's own, which is known to fit.
+        all_bullets = [t for b in job_blocks for t in b["_bullet_texts"]]
+        line_capacity = int(max(len(t) for t in all_bullets) * 0.95) if all_bullets else 100
+        skills_char_limit = len(", ".join(skills_items)) or 500
+        summary_char_limit = len(summary_original) or 600
+        original_standards = _standards(original_full_text + " " + ", ".join(skills_items))
+        whole_cv_text = "\n".join(p.text for p in base_doc.paragraphs)
+        jd_text = (f"{job.get('role_title', '')} {job.get('role_description', '')} "
+                   f"{row.get('company_industry', '')}")
+        # Bullets about a website/portfolio are personal facts, not achievements to reframe —
+        # a rewrite once turned "portfolio site documenting 22 projects" into "managed a
+        # 22-project portfolio". Those slots always keep their original wording.
+        locked = {(ji, bi) for ji, b in enumerate(job_blocks) for bi, t in enumerate(b["_bullet_texts"])
+                  if re.search(r"https?://|www\.|\.(dev|io|com|co\.uk)\b|portfolio", t, re.IGNORECASE)}
 
         facts = _extract_facts(job_blocks, summary_original)
         for block, proposed_job in zip(job_blocks, facts.get("jobs") or []):
-            tags = proposed_job.get("bullet_tags") or []
+            tags = (proposed_job.get("bullet_tags") if isinstance(proposed_job, dict) else None) or []
             # Fallback per-bullet if extraction came back short/malformed: use the raw bullet as its
             # own one-item "tag" rather than lose the fact entirely.
             block["_fact_tags"] = [
                 tags[i] if i < len(tags) and tags[i] else [orig]
                 for i, orig in enumerate(block["_bullet_texts"])
             ]
+        for block in job_blocks:  # extraction returned fewer jobs than the CV has
+            block.setdefault("_fact_tags", [[t] for t in block["_bullet_texts"]])
         summary_tags = facts.get("summary_tags") or [summary_original]
 
         retry_hint = ""
@@ -579,7 +870,33 @@ def tailor_cv(row: dict, job: dict, row_number, out_dir: Optional[str] = None) -
                 summary_tags=summary_tags,
                 shorten_hint=retry_hint,
                 length_scale=length_scale,
+                bullet_char_limit=line_capacity,
+                skills_char_limit=skills_char_limit,
             )
+            if not _well_formed(result, job_blocks):
+                log.warning("CVAgent: attempt %d returned a malformed rewrite, retrying", attempt)
+                retry_hint = ("IMPORTANT: your previous answer was malformed. jobs[] must have exactly "
+                              f"{len(job_blocks)} objects, each with a bullets[] list of exactly that "
+                              "job's bullet_slots strings.")
+                continue
+            reverted = _enforce_lengths(
+                result, job_blocks,
+                bullet_limit=max(40, int(line_capacity * length_scale)),
+                skills_limit=max(150, int(skills_char_limit * length_scale)),
+                summary_char_limit=max(150, int(summary_char_limit * length_scale)),
+                summary_original=summary_original,
+            )
+            if reverted:
+                log.info("CVAgent: attempt %d — %d over-long bullet(s) kept as original wording", attempt, reverted)
+            for ji, bi in locked:
+                jobs_out = result.get("jobs") or []
+                if ji < len(jobs_out) and bi < len(jobs_out[ji].get("bullets") or []):
+                    jobs_out[ji]["bullets"][bi] = job_blocks[ji]["_bullet_texts"][bi]
+            repaired = _repair_honesty(result, job_blocks, summary_original, whole_cv_text,
+                                       jd_text, original_standards)
+            if repaired:
+                log.info("CVAgent: attempt %d — %d piece(s) put back to the real CV's wording "
+                         "(job-ad terms, credentials or facts from another job)", attempt, repaired)
 
             attempt_doc = docx.Document(CV_MASTER_DOCX)
             _apply_rewrite(attempt_doc, summary_idx, summary_original, job_blocks,
@@ -599,6 +916,46 @@ def tailor_cv(row: dict, job: dict, row_number, out_dir: Optional[str] = None) -
                     f"in the CV at all, or were attributed to the wrong job: {sorted(fabricated)}. Every "
                     f"number/percentage/currency figure in a job's bullets must come from THAT job's own "
                     f"facts_achieved_in_this_job list — remove or fix these."
+                )
+                continue
+
+            new_text_all = _collect_text(attempt_doc, summary_idx, job_blocks)
+            if skills_idx is not None:
+                new_text_all += " " + attempt_doc.paragraphs[skills_idx].text
+            borrowed = _jd_borrowed_terms(new_text_all, whole_cv_text, jd_text)
+            credentials = _invented_credentials(new_text_all, whole_cv_text)
+            if borrowed or credentials:
+                log.warning("CVAgent: attempt %d presented job-ad terms / credentials as his own: %s, retrying",
+                            attempt, sorted(borrowed | credentials))
+                retry_hint = (
+                    f"IMPORTANT: your previous attempt used these words, which come from the job "
+                    f"description but appear NOWHERE in Prateek's real CV: {sorted(borrowed | credentials)}. "
+                    f"That presents the employer's domain or a credential as his own experience, which "
+                    f"is fabrication. Describe his real work in his CV's own terms; the job ad's wording "
+                    f"may only be used for skills he genuinely has under a different name."
+                )
+                continue
+
+            moved = _misattributed_bullets(job_blocks, result, jd_text, whole_cv_text)
+            if moved:
+                log.warning("CVAgent: attempt %d put facts under the wrong job: %s, retrying", attempt,
+                            [(job_ctx, terms) for job_ctx, _, terms in moved])
+                retry_hint = (
+                    "IMPORTANT: your previous attempt placed facts under the wrong employer: "
+                    + "; ".join(f'"{text}" under {job_ctx} uses {terms}, which belong to a different job'
+                                for job_ctx, text, terms in moved)
+                    + ". Each job's bullets may only use that job's own fact tags."
+                )
+                continue
+
+            invented_standards = _standards(new_text_all) - original_standards
+            if invented_standards:
+                log.warning("CVAgent: attempt %d claimed standards not in the real CV: %s, retrying",
+                            attempt, sorted(invented_standards))
+                retry_hint = (
+                    f"IMPORTANT: your previous attempt claimed these standards/certifications, which "
+                    f"appear nowhere in Prateek's real CV: {sorted(invented_standards)}. Never copy a "
+                    f"standard or certification from the job description unless the CV already has it."
                 )
                 continue
 

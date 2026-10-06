@@ -46,6 +46,8 @@ from agents.research_agent import find_matching_role
 from agents.email_writer import write_email
 from agents.gmail_agent import GmailAgent
 from agents.cv_agent import tailor_cv
+from agents.reply_classifier import classify_reply
+from agents import auto_responder
 from sheet_sort import main as sort_all_sheets
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -320,6 +322,26 @@ def process_sender(sender: dict, mode: str):
     log.info("[%s] Row %d | %s | %s | seq %d | tier %s | country %s",
              name, row["row_number"], recipient, company, seq, row.get("tier", "?"), country)
 
+    gmail = GmailAgent(sender)
+
+    # Last check before a followup: has anyone replied since our last email? The
+    # reply checker only runs after each send cycle, so without this a reply that
+    # arrived overnight got a followup at the first run of the day.
+    if seq > 0 and existing_thread:
+        pending_reply = gmail.inbound_since_last_sent(existing_thread)
+        if pending_reply:
+            verdict = classify_reply(pending_reply)["category"]
+            live_row = sheet._live_row_number(recipient, row["row_number"])
+            if verdict == "left_company":
+                sheet.mark_no_longer_with_company(live_row)
+                log.info("[%s] Followup to %s cancelled — departure notice in thread", name, recipient)
+                return
+            if verdict == "real_reply":
+                sheet.mark_reply_received(live_row)
+                log.info("[%s] Followup to %s cancelled — they replied since our last email", name, recipient)
+                return
+            log.info("[%s] Only an out-of-office in thread for %s — followup goes ahead", name, recipient)
+
     # Research (initial email only)
     if seq == 0:
         log.info("[%s] Researching %s", name, company)
@@ -363,7 +385,6 @@ def process_sender(sender: dict, mode: str):
     # folder); followups reattach the exact same file sent in the initial email,
     # fetched from that thread, rather than generating a new one. Falls back to the
     # static master CV whenever tailoring/fetch doesn't produce something usable.
-    gmail = GmailAgent(sender)
     cv_temp_dir = None
     cv_path = sender["cv_path"]
     cv_bytes = None
@@ -544,6 +565,14 @@ def main():
         )
     except Exception as exc:
         log.warning("Reply checker failed: %s", exc)
+
+    # Answer routine replies (no vacancies / forwarded / apply via portal / ...) and
+    # flag the rest for a manual reply — after reply_checker, so statuses are fresh.
+    log.info("--- Auto-replies ---")
+    try:
+        auto_responder.run_all()
+    except Exception as exc:
+        log.warning("Auto-responder failed: %s", exc)
 
     # Mark contacts "not interested" once their final followup checkpoint has
     # passed with still no reply (reply_checker above gets first look, so a

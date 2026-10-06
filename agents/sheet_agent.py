@@ -15,7 +15,7 @@ from config.settings import (
     SPREADSHEET_ID, COLUMNS, GOOGLE_SCOPES, TIMEZONE,
     STATUS_BLANK, STATUS_FOLLOWUP_INITIATED, STATUS_DISCUSSION,
     STATUS_NOT_INTERESTED, STATUS_BOUNCED, STATUS_NO_LONGER_WITH_COMPANY,
-    REPLY_STATUS_RECEIVED,
+    STATUS_NO_ROLE, REPLY_STATUS_RECEIVED,
     MAX_SEQUENCE, DAILY_PER_TIER,
     DAILY_LIMIT_WEEKDAY, DAILY_LIMIT_FRIDAY,
     SENDERS,
@@ -154,12 +154,15 @@ class SheetAgent:
             if not email:
                 continue
             if status in (STATUS_DISCUSSION, STATUS_NOT_INTERESTED, STATUS_BOUNCED,
-                          STATUS_NO_LONGER_WITH_COMPANY):
+                          STATUS_NO_LONGER_WITH_COMPANY, STATUS_NO_ROLE):
                 continue
             if reply_status == REPLY_STATUS_RECEIVED:
                 continue
 
-            is_fresh    = status == STATUS_BLANK and seq == 0
+            # A blank row that already carries a Thread ID is a colleague added by hand
+            # to an existing conversation (e.g. someone who replied on the contact's
+            # behalf) — never a fresh cold-email target.
+            is_fresh    = status == STATUS_BLANK and seq == 0 and not self._get_val(row, "thread_id")
             is_followup = (
                 status == STATUS_FOLLOWUP_INITIATED
                 and seq < MAX_SEQUENCE
@@ -198,7 +201,7 @@ class SheetAgent:
             if not email:
                 continue
             if status in (STATUS_DISCUSSION, STATUS_NOT_INTERESTED, STATUS_BOUNCED,
-                          STATUS_NO_LONGER_WITH_COMPANY):
+                          STATUS_NO_LONGER_WITH_COMPANY, STATUS_NO_ROLE):
                 continue
             if reply_status == REPLY_STATUS_RECEIVED:
                 continue
@@ -210,7 +213,7 @@ class SheetAgent:
             except (ValueError, TypeError):
                 seq = 0
 
-            is_fresh = status == STATUS_BLANK and seq == 0
+            is_fresh = status == STATUS_BLANK and seq == 0 and not self._get_val(row, "thread_id")
             followup_date = self._parse_date(self._get_val(row, "next_followup_date"))
             is_followup_due = (
                 status == STATUS_FOLLOWUP_INITIATED
