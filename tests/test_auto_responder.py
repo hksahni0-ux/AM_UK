@@ -37,6 +37,8 @@ class AutoResponderRegressionTests(unittest.TestCase):
         self.assertEqual(result.action, "reply")
         self.assertEqual(result.reply_type, "apply_via_portal")
         self.assertIn("Applying from overseas", result.plain)
+        self.assertIn("a portal application on its own rarely reaches a hiring manager", result.plain)
+        self.assertIn("flag it to the hiring manager", result.plain)
 
     def test_footer_please_dont_print_does_not_block_forwarded_reply(self):
         message = self._message(
