@@ -520,10 +520,12 @@ def main():
 
     pool = ThreadPoolExecutor(max_workers=len(SENDERS))
     futures = {pool.submit(process_sender, s, mode): s["email"] for s in SENDERS}
-    # Normal runs finish in well under 30s, but CV tailoring can take up to
-    # _MAX_ATTEMPTS (4) shrink retries at ~25-30s each — give that room rather
-    # than killing a sender mid-tailor. Still far under the 15-min cron interval.
-    done, pending = wait(futures, timeout=300)
+    # Normal runs finish in well under 30s, but CV tailoring / AI generation can
+    # legitimately take longer than a few minutes when the provider is slow or a
+    # tailored CV hits multiple shrink retries. Keep the guardrail in place but
+    # widen it enough to avoid aborting healthy senders in CI.
+    _SENDER_TIMEOUT_SECONDS = 600
+    done, pending = wait(futures, timeout=_SENDER_TIMEOUT_SECONDS)
 
     for future in done:
         sender_email = futures[future]
@@ -534,7 +536,8 @@ def main():
 
     if pending:
         for future in pending:
-            log.error("[%s] Sender processing exceeded 300s — abandoning to release the lock", futures[future])
+            log.error("[%s] Sender processing exceeded %ds — abandoning to release the lock",
+                      futures[future], _SENDER_TIMEOUT_SECONDS)
         pool.shutdown(wait=False)
         # A stuck thread (e.g. a hung network call) would otherwise block process exit
         # forever and hold email_runner.lock — force-exit rather than wait on it.
