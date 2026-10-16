@@ -131,20 +131,20 @@ LLM_MODELS = {
         "contact_extract":  "claude-haiku-4-5-20251001",
     },
     "nvidia": {
-        "email_write":      "nvidia/nemotron-3-ultra-550b-a55b",
-        "cv_extract_facts": "nvidia/nemotron-3-ultra-550b-a55b",
-        "cv_write":         "nvidia/nemotron-3-ultra-550b-a55b",
-        "role_match":       "nvidia/nemotron-3-super-120b-a12b",
+        "email_write":      "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "cv_extract_facts": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "cv_write":         "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "role_match":       "nvidia/nemotron-3.5-super-vl-120b-a12b",
         # nemotron-3-nano-30b-a3b was retired by NVIDIA (HTTP 410 Gone, Oct 2026).
-        "link_pick":        "nvidia/nemotron-3-super-120b-a12b",
-        "ooo_extract":      "nvidia/nemotron-3-super-120b-a12b",
+        "link_pick":        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "ooo_extract":      "nvidia/nemotron-3.5-super-vl-120b-a12b",
         # nano was too liberal on this nuanced judgment call (flagged plain declines
         # as "left the company") — use the larger model, this task runs rarely.
-        "left_company_check": "nvidia/nemotron-3-super-120b-a12b",
+        "left_company_check": "nvidia/nemotron-3.5-super-vl-120b-a12b",
         # Decides whether an outbound reply goes out at all — same reasoning as
         # left_company_check: a nuanced judgment, so not the nano tier.
-        "reply_route":      "nvidia/nemotron-3-super-120b-a12b",
-        "contact_extract":  "nvidia/nemotron-3-super-120b-a12b",
+        "reply_route":      "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "contact_extract":  "nvidia/nemotron-3.5-super-vl-120b-a12b",
     },
 }
 

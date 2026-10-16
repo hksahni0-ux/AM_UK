@@ -44,6 +44,7 @@ _NVIDIA_REASONING_BUFFER = 3000
 # "super" (already proven stable in production for role_match/left_company_check)
 # rather than losing the whole 15-minute cycle for that contact.
 _NVIDIA_FALLBACK_MODEL = {
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-super-120b-a12b",
 }
 
