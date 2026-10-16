@@ -211,7 +211,8 @@ _HUMAN_TRIGGERS = [
     ("asked not to be contacted", re.compile(
         r"(do not (contact|email)|don't (contact|email)|stop (contacting|emailing|sending)|"
         r"unsubscribe|remove me|no (need|requirement) (for you )?to follow up|"
-        r"not appropriate|please don't|several (e-?mails|times)|two more occasions)",
+        r"not appropriate|please don't (contact|email|follow up|send)|"
+        r"several (e-?mails|times)|two more occasions)",
         re.IGNORECASE)),
     ("comment about AI-written email", re.compile(
         r"\b(use ai|using ai|ai to write|written by ai|chatgpt)\b", re.IGNORECASE)),
@@ -262,6 +263,7 @@ _GATES = {
         r"(career|careers|vacanc\w* page|jobs? (site|page|board|portal)|portal|"
         r"apply (directly|online|through|via|on)|application (portal|process|system)|"
         r"recruitment (site|system|management)|website|linkedin|indeed|"
+        r"correct channels?|appropriate channels?|"
         r"(accept|take|process) applications|official (way|route|channel)|"
         r"(open|current) (positions|vacancies|roles|opportunities) (here|at|on|are)|"
         r"list of (our )?(open )?(positions|vacancies|roles))", re.IGNORECASE),
