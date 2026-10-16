@@ -37,15 +37,15 @@ def _model_for(task: str) -> str:
 # field, so a budget sized for Claude's direct-answer output leaves no room for the
 # actual answer and the call comes back truncated with content=null. Pad it here
 # rather than at every call site.
-_NVIDIA_REASONING_BUFFER = 3000
+# Raised from 3000 (Oct 2026): Nemotron 3.5 Super reasoned past 2000 tokens even for a
+# 200-character reply.
+_NVIDIA_REASONING_BUFFER = 6000
 
-# "ultra" is NVIDIA's heaviest tier and the one that's shown repeated 503s
-# (backend overloaded) on write-heavy tasks — on a 503, step down once to
-# "super" (already proven stable in production for role_match/left_company_check)
-# rather than losing the whole 15-minute cycle for that contact.
+# On a timeout or 503 (backend overloaded), step down once to Nemotron 3 Super (proven
+# stable in production) rather than losing the whole 15-minute cycle for that contact.
+# Nemotron 3 Ultra, the old write-task model, was retired by NVIDIA in Oct 2026 (HTTP 404).
 _NVIDIA_FALLBACK_MODEL = {
     "nvidia/nemotron-3.5-super-vl-120b-a12b": "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-super-120b-a12b",
 }
 
 
